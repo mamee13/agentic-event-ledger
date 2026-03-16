@@ -22,6 +22,9 @@ A component that uses LangChain callbacks to capture trace data is **Event-Drive
 
 **The four aggregates chosen:** `LoanApplication`, `AgentSession`, `ComplianceRecord`, `AuditLedger`.
 
+**Rejected boundary:** Merge `ComplianceRecord` into `LoanApplication`.
+**Reason:** Introduces write contention between concurrent agents, causing retry storms on the `loan-{id}` stream.
+
 **Alternative boundary considered and rejected:** Merging `ComplianceRecord` into `LoanApplication` as a nested sub-entity — one stream `loan-{id}` containing both loan lifecycle events and compliance rule events.
 
 **Why it was rejected:**
@@ -64,7 +67,7 @@ The query hits the `ApplicationSummary` projection table, which still shows the 
 3. If `as_of_position < write_position`, the UI renders a subtle indicator: *"Balance updating — last refreshed N ms ago"* and polls the health endpoint (`ledger://ledger/health`) until the projection catches up.
 4. For the specific "available credit limit" field, the UI can also implement **read-after-write consistency** at the application layer: after a disbursement command succeeds, the client holds the new limit locally and displays it immediately, treating the projection as eventually consistent background confirmation.
 
-The SLO for `ApplicationSummary` is 500ms lag. If `get_lag()` exceeds 500ms, the health endpoint returns `WARNING` and the UI can display a degraded-mode banner.
+**SLO commitments:** `ApplicationSummary` < 500ms lag, `ComplianceAuditView` < 2s lag. Both enforced via `get_lag()` metrics exposed on the health endpoint and asserted in the SLO test suite. If `ApplicationSummary` lag exceeds 500ms, the health endpoint returns `WARNING` and the UI can display a degraded-mode banner.
 
 ---
 
@@ -129,7 +132,7 @@ def _infer_regulatory_basis(recorded_at: str | None) -> list[str]:
     return ["REG-2025-BASEL-III", "REG-2025-AML-v3"]
 ```
 
-**Inference strategy for `model_version`:** The model deployment history is a known, auditable external record (deployment logs, MLflow registry). Mapping `recorded_at` to a model version is a deterministic lookup, not a guess. The error rate is low for events with accurate timestamps; it is zero for events after version tracking was introduced.
+**Note on implementation upcasters:** The example above uses `CreditDecisionMade` to illustrate the pattern. In Phase 4 implementation, the actual upcasters are `CreditAnalysisCompleted` v1→v2 (adds `model_version`, `confidence_score`, `regulatory_basis`) and `DecisionGenerated` v1→v2 (adds `model_versions{}` dict reconstructed from contributing agent sessions). The inference strategy and null-vs-fabrication reasoning above applies directly to both.
 
 **Why `confidence_score` is `None` and not inferred:** The confidence score is a numerical output of the model at inference time. It was never stored in v1. There is no deterministic way to reconstruct it — re-running the model on the original inputs would require the original inputs (not stored) and the original model weights (may be unavailable). Setting it to `None` is honest. Fabricating a value (e.g., `0.75` as a "typical" score) would cause downstream systems — compliance checks, regulatory reports — to treat a fabricated number as a real model output. The downstream consequence of a fabricated confidence score is a compliance violation. `None` forces downstream consumers to handle the unknown case explicitly.
 
@@ -164,3 +167,5 @@ A **coordinator process** (or the nodes themselves via leader election using `pg
 **Failure mode this guards against:** A single projection daemon node crashing mid-batch. Without distributed coordination, the projection stops until the node restarts. With shard redistribution, another node detects the stale heartbeat within 15 seconds and resumes from the dead node's last checkpoint. The checkpoint-per-shard in `projection_checkpoints` ensures no events are skipped or double-processed.
 
 The key difference from Marten: Marten's daemon is built into the framework with battle-tested shard rebalancing. The Python equivalent requires explicit implementation of the heartbeat, leader election, and shard assignment logic — more code, same pattern.
+
+**Inference strategy for `model_version`:** The model deployment history is a known, auditable external record (deployment logs, MLflow registry). Mapping `recorded_at` to a model version is a deterministic lookup, not a guess. The error rate is low for events with accurate timestamps; it is zero for events after version tracking was introduced.

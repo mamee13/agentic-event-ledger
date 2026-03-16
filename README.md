@@ -8,6 +8,9 @@ An event-sourced ledger system designed for AI agents and enterprise auditing.
 - Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
 
+> [!IMPORTANT]
+> **Tooling Enforcement**: All tooling (install, run, test, lint) **must** be run via `uv`. Do not use `pip`, `poetry`, or other package managers.
+
 ### Installation
 1. Clone the repository and navigate to the root:
    ```bash
@@ -31,6 +34,7 @@ An event-sourced ledger system designed for AI agents and enterprise auditing.
 ### Workflow Commands
 - **Run Tests**: `uv run pytest`
 - **Linting**: `uv run ruff check . --fix`
+- **Formatting**: `uv run ruff format .`
 - **Type Checking**: `uv run mypy .`
 - **Run Application**: `uv run ledger` (once implemented)
 
