@@ -24,7 +24,7 @@ An event-sourced ledger system designed for AI agents and enterprise auditing.
 3. Configure environment variables:
    ```bash
    cp .env.example .env
-   # Edit .env with your local settings
+   # Edit .env with your OpenRouter API key and desired model
    ```
 4. Install pre-commit hooks:
    ```bash
