@@ -4,11 +4,7 @@
 
 ---
 
-## 1. Aggregate Boundary Justification
-
-> Why is `ComplianceRecord` a separate aggregate from `LoanApplication`? What would couple if you merged them? Trace the coupling to a specific failure mode under concurrent write scenarios.
-
-*To be completed after Phase 2 implementation.*
+`ComplianceRecord` is separate from `LoanApplication` because it represents an external regulatory constraint that must be immutable once verified. Merging them would couple the high-churn domain logic of a loan application (which may change based on market conditions) with the stable regulatory logic. In failure cases, a merged aggregate would cause write contention between agents performing automated checks and human underwriters, potentially leading to deadlocks on the record. By keeping them separate, we can update compliance status independently of the application process.
 
 ---
 
@@ -24,7 +20,9 @@
 
 > Under peak load (100 concurrent applications, 4 agents each), how many `OptimisticConcurrencyErrors` do you expect per minute on `loan-{id}` streams? What is the retry strategy and what is the maximum retry budget before returning a failure to the caller?
 
-*To be completed after Phase 2 implementation.*
+Under peak load (100 concurrent applications, 4 agents each), `OptimisticConcurrencyErrors` are expected when agents make overlapping decisions. Our implementation uses row-level locking (`SELECT ... FOR UPDATE`) on the `event_streams` table to serialize appends to the same stream. Agents that lose the race will receive an error and must reload the stream state before retrying. 
+
+**Retry Strategy:** Agents should implement exponential backoff with a maximum of 3 retries. If the conflict persists, the agent should abort and signal a coordination failure to the Decision Orchestrator.
 
 ---
 
@@ -56,7 +54,20 @@
 
 > Every column in the `events`, `event_streams`, `projection_checkpoints`, and `outbox` tables justified.
 
-*To be completed after Phase 1 implementation.*
+### `events` table
+- `global_position` (BIGSERIAL): Global ordering for the entire ledger. Essential for projections and catch-up subscriptions.
+- `stream_id` (TEXT): The aggregate instance ID. Indexed for fast stream loading.
+- `stream_position` (INT): Event order within the stream. Used for optimistic concurrency validation.
+- `event_type` (TEXT): Domain name of the event. Used for routing and filtering.
+- `payload` (JSONB): The event data.
+- `metadata` (JSONB): Non-domain data (correlation_id, causation_id, agent_metadata).
+
+### `event_streams` table
+- `stream_id` (TEXT): Unique stream identifier.
+- `current_version` (INT): The current position of the last event. Used as the lock point for writes.
+
+### `outbox` table
+- `event_id` (UUID): Reference to the event to be published. Ensures at-least-once delivery when paired with a reliable publisher.
 
 ---
 

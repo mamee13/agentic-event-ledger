@@ -38,7 +38,7 @@ class AgenticLedgerError(Exception):
         }
 
 
-class ConcurrencyError(AgenticLedgerError):
+class OptimisticConcurrencyError(AgenticLedgerError):
     """Raised when an optimistic concurrency check fails."""
 
     def __init__(self, stream_id: str, expected_version: int, actual_version: int):
