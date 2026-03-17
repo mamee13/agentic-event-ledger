@@ -1,18 +1,19 @@
 import asyncpg
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class DatabaseSettings(BaseSettings):
-    postgres_user: str = "postgres"
-    postgres_password: str = "postgres"
-    postgres_db: str = "event_ledger"
-    postgres_host: str = "localhost"
-    postgres_port: int = 5432
+    postgres_user: str = Field(alias="POSTGRES_USER")
+    postgres_password: str = Field(alias="POSTGRES_PASSWORD")
+    postgres_db: str = Field(alias="POSTGRES_DB")
+    postgres_host: str = Field(alias="POSTGRES_HOST")
+    postgres_port: int = Field(alias="POSTGRES_PORT")
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
-settings = DatabaseSettings()
+settings = DatabaseSettings()  # type: ignore[call-arg]
 
 
 def get_dsn() -> str:
