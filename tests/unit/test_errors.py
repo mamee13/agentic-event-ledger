@@ -1,4 +1,4 @@
-from ledger.core.errors import AgenticLedgerError, ConcurrencyError, ErrorCode
+from ledger.core.errors import AgenticLedgerError, ErrorCode, OptimisticConcurrencyError
 
 
 def test_ledger_error_dict() -> None:
@@ -11,8 +11,8 @@ def test_ledger_error_dict() -> None:
     assert data["suggested_action"] == "Fix it"
 
 
-def test_concurrency_error() -> None:
-    error = ConcurrencyError("stream-1", expected_version=5, actual_version=6)
+def test_optimistic_concurrency_error() -> None:
+    error = OptimisticConcurrencyError("stream-1", expected_version=5, actual_version=6)
     data = error.to_dict()
     assert data["error_code"] == "CONCURRENCY_CONFLICT"
     assert "stream-1" in data["message"]

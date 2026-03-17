@@ -4,7 +4,14 @@
 
 ---
 
-`ComplianceRecord` is separate from `LoanApplication` because it represents an external regulatory constraint that must be immutable once verified. Merging them would couple the high-churn domain logic of a loan application (which may change based on market conditions) with the stable regulatory logic. In failure cases, a merged aggregate would cause write contention between agents performing automated checks and human underwriters, potentially leading to deadlocks on the record. By keeping them separate, we can update compliance status independently of the application process.
+## 1. Aggregate Boundary Reasoning
+
+We split the domain into two primary aggregates: `LoanApplicationAggregate` and `AgentSessionAggregate`. 
+
+- **LoanApplicationAggregate**: This is the core "Unit of Work." It encompasses everything related to a specific loan's state machine, business rules (like confidence floors), and compliance results. Merging compliance into this aggregate ensures that approvals are atomically blocked unless all checks pass, preventing race conditions where an application might be approved while a compliance failure is being recorded.
+- **AgentSessionAggregate**: This aggregate is decoupled from specific loans. It tracks an agent's lifecycle (context loading, activity status). Splitting this prevents write contention: multiple agents can be active and recording their internal state without locking a specific loan stream until they are ready to contribute a result.
+
+Keeping these boundaries separate allows for high concurrency during the "Under Review" phase, where multiple AI agents can load their context and prepare analyses in parallel sessions without interfering with each other's persistence.
 
 ---
 
