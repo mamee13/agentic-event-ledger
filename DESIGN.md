@@ -42,9 +42,21 @@ The `AuditLedger` aggregate lives on `audit-{entity_type}-{entity_id}`. It is ap
 
 ## 2. Projection Strategy
 
-> For each projection, justify: Inline vs. Async, and the SLO commitment. For `ComplianceAuditView` temporal query, justify your snapshot strategy and describe snapshot invalidation logic.
+### ApplicationSummary (Async, SLO: 500ms lag)
+This projection provides a flattened view of loan applications for real-time UI updates. It is updated asynchronously by the `ProjectionDaemon` to keep the write path fast.
 
-*To be completed after Phase 3 implementation.*
+### AgentPerformanceLedger (Async, SLO: 2s lag)
+Aggregates metrics for agents. The 2s lag is acceptable as these metrics are typically used for reporting and monitoring, not hot-path decisions.
+
+### ComplianceAuditView (Async, SLO: 2s lag)
+Stores full event history per application to support temporal queries (`get_compliance_at`). Uses snapshots every 50 events to optimize rehydration for applications with long histories.
+
+### Snapshot Strategy & Invalidation
+- **Strategy**: Count-based snapshots. A snapshot of the rehydrated state is stored in `projection_snapshots` every 50 events for a given `application_id`.
+- **Invalidation Rules**:
+    - **Upcasting**: If a new version of an event is introduced and an upcaster is added that changes the payload structure, all existing snapshots for that projection must be invalidated (deleted) as the rehydrated state would be different.
+    - **Logic Changes**: Significant changes to the `_rehydrate_compliance` logic require a full rebuild and snapshot invalidation.
+    - **Zero-Downtime Rebuild**: The `rebuild_from_scratch()` method handles the migration to new schemas/logic by populating a side table before swapping, ensuring live reads continue to serve stale but consistent data until the swap.
 
 ---
 
@@ -62,7 +74,9 @@ Under peak load (100 concurrent applications, 4 agents each), `OptimisticConcurr
 
 > For every inferred field in your upcasters, quantify the likely error rate and the downstream consequence of an incorrect inference. When would you choose null over an inference?
 
-*To be completed after Phase 4 implementation.*
+- **model_version**: Inferred from `recorded_at` timestamps using a registry of active models. Low error rate (approx 1%) but critical if a model was swapped mid-second.
+- **regulatory_basis**: Reconstructed from the regulation set active at the time of the event. High confidence as regulatory windows are well-defined.
+- **Confidence scores**: Prefer `null` over inference if not explicitly stored, as hallucinating confidence scores would compromise the audit trail's integrity.
 
 ---
 
