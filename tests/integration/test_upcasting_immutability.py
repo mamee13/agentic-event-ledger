@@ -60,3 +60,68 @@ async def test_upcasting_does_not_mutate_db_row() -> None:
     assert raw_row_after["event_version"] == 1, "DB event_version must remain 1"
 
     await pool.close()
+
+
+@pytest.mark.asyncio
+async def test_decision_v1_reconstructs_model_versions_from_db() -> None:
+    """DecisionGenerated v1 loaded from DB must have model_versions populated
+    by reading the contributing AgentSession streams — not left as {}."""
+    pool = await get_pool()
+    store = EventStore(pool)
+
+    agent_id = f"agent-{uuid4()}"
+    session_id = str(uuid4())
+    session_stream = f"agent-{agent_id}-{session_id}"
+
+    # Write the AgentSession stream with a known model_version
+    await store.append(
+        session_stream,
+        [
+            BaseEvent(
+                event_type="AgentContextLoaded",
+                payload={"agent_id": agent_id, "model_version": "v2.5"},
+            )
+        ],
+        expected_version=-1,
+    )
+
+    # Write a v1 DecisionGenerated (no model_versions field)
+    decision_stream = f"loan-decision-{uuid4()}"
+    v1_decision = BaseEvent(
+        event_type="DecisionGenerated",
+        event_version=1,
+        payload={
+            "recommendation": "APPROVE",
+            "contributing_agent_sessions": [session_stream],
+            # deliberately no model_versions — this is a v1 event
+        },
+    )
+    await store.append(decision_stream, [v1_decision], expected_version=-1)
+
+    # Verify raw DB has no model_versions
+    import json as _json
+
+    raw = await pool.fetchrow(
+        "SELECT payload, event_version FROM events WHERE stream_id = $1", decision_stream
+    )
+    assert raw is not None
+    raw_payload = _json.loads(raw["payload"])
+    assert "model_versions" not in raw_payload
+    assert raw["event_version"] == 1
+
+    # Load via EventStore — must reconstruct model_versions from the session stream
+    events = await store.load_stream(decision_stream)
+    assert len(events) == 1
+    loaded = events[0]
+    assert loaded.event_version == 2
+    assert loaded.payload["model_versions"] == {session_stream: "v2.5"}
+
+    # DB row must still be unchanged
+    raw_after = await pool.fetchrow(
+        "SELECT payload, event_version FROM events WHERE stream_id = $1", decision_stream
+    )
+    assert raw_after is not None
+    assert _json.loads(raw_after["payload"]) == raw_payload
+    assert raw_after["event_version"] == 1
+
+    await pool.close()

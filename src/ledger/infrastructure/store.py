@@ -35,6 +35,48 @@ class EventStore:
         data["payload"] = payload
         return data
 
+    async def _build_session_model_cache(self, session_ids: list[str]) -> dict[str, str]:
+        """Loads model_version for each AgentSession stream from its AgentContextLoaded event.
+
+        Used to populate _session_model_cache for DecisionGenerated v1→v2 upcasting.
+        Only queries sessions not already resolved; returns {session_id: model_version}.
+        """
+        if not session_ids:
+            return {}
+        rows = await self._pool.fetch(
+            """
+            SELECT DISTINCT ON (stream_id) stream_id, payload
+            FROM events
+            WHERE stream_id = ANY($1) AND event_type = 'AgentContextLoaded'
+            ORDER BY stream_id, stream_position ASC
+            """,
+            session_ids,
+        )
+        cache: dict[str, str] = {}
+        for row in rows:
+            payload = row["payload"]
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            mv = payload.get("model_version")
+            if mv:
+                cache[str(row["stream_id"])] = str(mv)
+        return cache
+
+    async def _inject_session_cache(self, data: dict[str, Any]) -> dict[str, Any]:
+        """For v1 DecisionGenerated events, fetches and injects _session_model_cache
+        so the upcaster can reconstruct model_versions{} from real DB data."""
+        if (
+            data["event_type"] == "DecisionGenerated"
+            and int(data["event_version"]) == 1
+            and "model_versions" not in data["payload"]
+        ):
+            sessions: list[str] = data["payload"].get("contributing_agent_sessions", [])
+            if sessions:
+                cache = await self._build_session_model_cache(sessions)
+                data = dict(data)
+                data["payload"] = {**data["payload"], "_session_model_cache": cache}
+        return data
+
     async def append(
         self,
         stream_id: str,
@@ -156,6 +198,7 @@ class EventStore:
                 data["payload"] = json.loads(payload_val)
             if isinstance(metadata_val, str):
                 data["metadata"] = json.loads(metadata_val)
+            data = await self._inject_session_cache(data)
             data = self._apply_upcasting(data)
             events.append(StoredEvent.model_validate(data))
         return events
@@ -191,6 +234,7 @@ class EventStore:
                     data["payload"] = json.loads(p_str)
                 if isinstance(m_str, str):
                     data["metadata"] = json.loads(m_str)
+                data = await self._inject_session_cache(data)
                 data = self._apply_upcasting(data)
                 event = StoredEvent.model_validate(data)
                 yield event
