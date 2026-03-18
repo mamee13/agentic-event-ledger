@@ -9,7 +9,7 @@ from ledger.infrastructure.db.connection import get_pool
 from ledger.infrastructure.store import EventStore
 
 
-@pytest.mark.asyncio  # type: ignore[misc]
+@pytest.mark.asyncio
 async def test_double_decision_concurrency() -> None:
     """
     Two AI agents simultaneously attempt to append a CreditAnalysisCompleted event

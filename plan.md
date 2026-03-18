@@ -89,99 +89,122 @@ This plan breaks the work into clear phases, each with checkboxes you can tick o
 ---
 
 ## Phase 3 — Domain Logic (branch: `domain-aggregates`)
-- [ ] Implement LoanApplicationAggregate with explicit apply handlers for each relevant event.
-- [ ] Implement AgentSessionAggregate with explicit apply handlers for each relevant event.
-- [ ] Ensure aggregate `load()` replays stream events in order and updates `version` to the last event position.
-- [ ] Implement command handlers that follow: load aggregates -> validate rules -> build events -> append with expected_version.
-- [ ] Enforce the valid state transition sequence exactly as specified in the brief.
-- [ ] Enforce that AgentContextLoaded must be the first event in every AgentSession stream.
-- [ ] Enforce model-version locking so a second credit analysis is rejected unless superseded by human override.
-- [ ] Enforce the confidence floor so DecisionGenerated with confidence < 0.6 is forced to REFER.
-- [ ] Enforce compliance dependency so ApplicationApproved cannot be appended unless required checks have passed.
-- [ ] Enforce causal chain rules so contributing_agent_sessions reference only valid sessions for the application.
-- [ ] Add unit tests for each rule, including negative tests for missing prerequisites.
-- [ ] Add tests for invalid transition attempts (e.g., Approved -> UnderReview).
-- [ ] Update `DESIGN.md` with aggregate boundary reasoning and coupling tradeoffs.
+- [ ] Implement LoanApplicationAggregate with explicit apply handlers for these events: ApplicationSubmitted, CreditAnalysisRequested, DecisionGenerated (v2), HumanReviewCompleted, ApplicationApproved, ApplicationDeclined.
+- [ ] Implement AgentSessionAggregate with explicit apply handlers for these events: AgentContextLoaded, CreditAnalysisCompleted (v2), FraudScreeningCompleted (v1).
+- [ ] Implement ComplianceRecord aggregate with explicit apply handlers for these events: ComplianceCheckRequested, ComplianceRulePassed, ComplianceRuleFailed.
+- [ ] Ensure each aggregate implements `load()` that replays its own stream in order and sets `version` to the last event position.
+- [ ] Enforce the exact LoanApplication state machine: Submitted → AwaitingAnalysis → AnalysisComplete → ComplianceReview → PendingDecision → ApprovedPendingHuman/DeclinedPendingHuman → FinalApproved/FinalDeclined.
+- [ ] Enforce AgentSession Gas Town rule: AgentContextLoaded must be the first event; no decision event before it.
+- [ ] Enforce model-version locking in the LoanApplication aggregate: after first CreditAnalysisCompleted for an application, reject any further CreditAnalysisCompleted unless a HumanReviewCompleted with override=True has occurred.
+- [ ] Enforce confidence floor in the LoanApplication aggregate: DecisionGenerated with confidence_score < 0.6 must set recommendation="REFER".
+- [ ] Enforce compliance dependency in the LoanApplication aggregate by reading ComplianceRecord stream: ApplicationApproved cannot be appended unless all required ComplianceRulePassed events exist for that application.
+- [ ] Enforce causal chain in the LoanApplication aggregate: DecisionGenerated.contributing_agent_sessions[] must reference AgentSession stream IDs that contain a decision event for this application_id.
+- [ ] Implement command handlers that follow the exact pattern: load aggregates → validate rules → build events → append with expected_version.
+- [ ] Use the exact stream ID formats from the brief: loan-{application_id}, agent-{agent_id}-{session_id}, compliance-{application_id}, audit-{entity_type}-{entity_id}.
+- [ ] Use the exact payload field names from the event catalogue (e.g., DecisionGenerated uses recommendation, not decision).
+- [ ] Add unit tests for each rule with negative cases for missing prerequisites.
+- [ ] Add tests for invalid transitions (e.g., DecisionGenerated from AnalysisComplete).
+- [ ] Add tests that reject DecisionGenerated with contributing_agent_sessions that did not process this application_id.
+- [ ] Update `DESIGN.md` with aggregate boundary reasoning and coupling tradeoffs (explicitly explain why ComplianceRecord is separate from LoanApplication).
 
 ---
 
 ## Phase 4 — Projections + Daemon (branch: `projections-daemon`)
-- [ ] Implement ProjectionDaemon with:
-- [ ] Continuous polling loop that loads from the lowest checkpoint.
-- [ ] Routing of each event to subscribed projections.
-- [ ] Checkpoint updates after successful batch processing.
-- [ ] Fault tolerance that logs errors, retries a limited number of times, then skips the offending event.
-- [ ] Lag measurement per projection based on global_position difference.
-- [ ] Build ApplicationSummary projection:
-- [ ] Store current application state fields exactly as specified.
-- [ ] Update on every relevant event and track last_event_type and last_event_at.
-- [ ] Build AgentPerformanceLedger projection:
-- [ ] Aggregate counts and averages by agent_id and model_version.
-- [ ] Update rates (approve/decline/refer) as decisions are generated.
-- [ ] Build ComplianceAuditView projection:
-- [ ] Store a full compliance record per application with rule versions and evidence hashes.
-- [ ] Implement get_current_compliance for live view queries.
-- [ ] Implement get_compliance_at(timestamp) using your snapshot strategy.
-- [ ] Implement rebuild_from_scratch that replays all events without downtime to reads.
-- [ ] Define and document the snapshot strategy in `DESIGN.md`.
-- [ ] Add tests simulating concurrent command load and validate lag SLOs (<500ms ApplicationSummary, <2s ComplianceAuditView).
+- [ ] Implement ProjectionDaemon with explicit methods:
+- [ ] run_forever(poll_interval_ms=100) that loops, calls _process_batch, sleeps.
+- [ ] _process_batch loads from the lowest projection checkpoint, processes events in batches, and updates checkpoints.
+- [ ] Route each event only to projections that subscribe to that event type.
+- [ ] Fault tolerance: log projection errors, retry a limited number of times, then skip the offending event and continue.
+- [ ] Lag measurement per projection: global_position - last_processed_position (exposed via get_lag()).
+- [ ] Build ApplicationSummary projection with the exact table schema from the brief:
+- [ ] application_id, state, applicant_id, requested_amount_usd, approved_amount_usd,
+- [ ] risk_tier, fraud_score, compliance_status, decision,
+- [ ] agent_sessions_completed[], last_event_type, last_event_at,
+- [ ] human_reviewer_id, final_decision_at.
+- [ ] Update ApplicationSummary on every relevant event and always set last_event_type/last_event_at.
+- [ ] Build AgentPerformanceLedger projection with the exact table schema from the brief:
+- [ ] agent_id, model_version, analyses_completed, decisions_generated,
+- [ ] avg_confidence_score, avg_duration_ms,
+- [ ] approve_rate, decline_rate, refer_rate,
+- [ ] human_override_rate, first_seen_at, last_seen_at.
+- [ ] Build ComplianceAuditView projection with full compliance history and temporal query support:
+- [ ] get_current_compliance(application_id) returns full compliance record.
+- [ ] get_compliance_at(application_id, timestamp) returns state as of timestamp.
+- [ ] get_projection_lag() returns ms between latest store event and last processed.
+- [ ] rebuild_from_scratch() replays all events without downtime to live reads.
+- [ ] Define a snapshot strategy (time-based, count-based, or manual) and document snapshot invalidation in `DESIGN.md`.
+- [ ] Add tests that simulate 50 concurrent command handlers and assert lag SLOs:
+- [ ] ApplicationSummary p99 lag < 500ms.
+- [ ] ComplianceAuditView p99 lag < 2s.
 
 ---
 
 ## Phase 5 — Upcasting + Integrity + Gas Town (branch: `upcasting-integrity`)
-- [ ] Implement UpcasterRegistry with auto-registration and chained upcasting by version.
-- [ ] Implement CreditAnalysisCompleted v1 -> v2 upcaster with:
-- [ ] model_version inferred from recorded_at or a documented rule.
-- [ ] confidence_score set to null when truly unknown.
-- [ ] regulatory_basis inferred from rule set active at recorded_at.
-- [ ] Implement DecisionGenerated v1 -> v2 upcaster with:
-- [ ] model_versions reconstructed from contributing agent sessions.
-- [ ] Performance implications documented in `DESIGN.md`.
-- [ ] Add immutability test:
-- [ ] Raw DB payload remains unchanged after upcasted reads.
-- [ ] Loaded events are upcasted to latest version in memory only.
-- [ ] Implement cryptographic audit chain:
-- [ ] Hash all event payloads since last integrity check.
-- [ ] Combine with previous hash and store in AuditIntegrityCheckRun.
-- [ ] Detect tampering by verifying hash chain continuity.
-- [ ] Implement reconstruct_agent_context:
-- [ ] Load full AgentSession stream and identify last action.
-- [ ] Summarize older events while keeping last 3 verbatim.
-- [ ] Flag NEEDS_RECONCILIATION if last event indicates a partial decision.
-- [ ] Add crash-recovery test that verifies context reconstruction is sufficient for resumption.
-- [ ] Update `DESIGN.md` with upcasting inference tradeoffs, error rates, and null vs inference decisions.
+- [ ] Implement UpcasterRegistry with decorator-based registration and chained upcasting by version.
+- [ ] Ensure EventStore.load_stream/load_all automatically apply upcasters transparently (callers never invoke them).
+- [ ] Implement CreditAnalysisCompleted v1 → v2 upcaster:
+- [ ] Add model_version inferred from recorded_at timestamp rule (documented).
+- [ ] Add confidence_score = null when truly unknown.
+- [ ] Add regulatory_basis inferred from rule set active at recorded_at.
+- [ ] Implement DecisionGenerated v1 → v2 upcaster:
+- [ ] Add model_versions{} reconstructed by loading contributing AgentSession streams.
+- [ ] Document the performance tradeoff of extra store lookups in `DESIGN.md`.
+- [ ] Add the immutability test:
+- [ ] Query raw DB payload for a v1 event.
+- [ ] Load via EventStore and verify v2 shape.
+- [ ] Re-query raw DB payload and verify it is unchanged.
+- [ ] Implement cryptographic audit chain for AuditLedger:
+- [ ] Hash payloads since last AuditIntegrityCheckRun.
+- [ ] new_hash = sha256(previous_hash + event_hashes).
+- [ ] Append AuditIntegrityCheckRun with integrity_hash and previous_hash.
+- [ ] Detect tampering by verifying chain continuity.
+- [ ] Implement reconstruct_agent_context per brief:
+- [ ] Load full AgentSession stream.
+- [ ] Identify last completed action and pending work.
+- [ ] Summarize older events and keep last 3 verbatim.
+- [ ] Flag NEEDS_RECONCILIATION if last event is partial/unfinished.
+- [ ] Add crash-recovery test proving reconstruction is sufficient to resume.
+- [ ] Update `DESIGN.md` with upcasting inference tradeoffs (error rates, null vs inference).
 
 ---
 
 ## Phase 6 — MCP Server + Docker (branch: `mcp-interface`)
-- [ ] Implement all 8 MCP tools with explicit validation and preconditions:
-- [ ] submit_application validates schema and duplicate IDs.
-- [ ] record_credit_analysis requires active AgentSession with context loaded.
-- [ ] record_fraud_screening enforces fraud_score range 0.0–1.0.
-- [ ] record_compliance_check ensures rule_id exists in regulation set.
-- [ ] generate_decision validates all prerequisites and enforces confidence floor.
-- [ ] record_human_review requires reviewer auth and override_reason if override.
-- [ ] start_agent_session writes AgentContextLoaded and returns session context position.
-- [ ] run_integrity_check enforces compliance role and rate limit.
-- [ ] Ensure all tool errors are structured with error_type, message, expected/actual versions where relevant, and suggested_action.
-- [ ] Implement MCP resources backed by projections (no aggregate replay), except for explicitly allowed stream reads.
-- [ ] Implement ledger health resource that returns all projection lags quickly.
-- [ ] Add full MCP integration test that runs the entire application lifecycle using only MCP tools.
+- [ ] Implement all 8 MCP tools with explicit validation and preconditions (from brief):
+- [ ] submit_application: schema validation and duplicate application_id check.
+- [ ] record_credit_analysis: active AgentSession with context loaded; optimistic concurrency on loan stream.
+- [ ] record_fraud_screening: active AgentSession with context loaded; fraud_score in 0.0–1.0.
+- [ ] record_compliance_check: rule_id exists in active regulation_set_version.
+- [ ] generate_decision: all required analyses present; enforce confidence floor.
+- [ ] record_human_review: reviewer_id authentication; if override=True then override_reason required.
+- [ ] start_agent_session: writes AgentContextLoaded with context source and token count.
+- [ ] run_integrity_check: compliance role only; rate-limited to 1/minute per entity.
+- [ ] Ensure all tool errors are structured objects with:
+- [ ] error_type, message, stream_id, expected_version, actual_version, suggested_action.
+- [ ] Implement MCP resources backed by projections only (no aggregate replay), except:
+- [ ] ledger://applications/{id}/audit-trail reads AuditLedger stream directly.
+- [ ] ledger://agents/{id}/sessions/{session_id} reads AgentSession stream directly.
+- [ ] Implement ledger://ledger/health that returns get_lag() for every projection in <10ms.
+- [ ] Add full MCP integration test that runs the complete lifecycle using only MCP tools:
+- [ ] start_agent_session → record_credit_analysis → generate_decision → record_human_review → query compliance view.
 - [ ] Add Docker support:
 - [ ] Dockerfile builds and runs the service.
-- [ ] Compose file (if used) wires Postgres and service together.
-- [ ] Provide clear run instructions in README.
+- [ ] Compose file wires Postgres and service together if used.
+- [ ] Provide run instructions in README.
 - [ ] Finalize `DESIGN.md` with EventStoreDB concept mapping and “what I’d do differently.”
 
 ---
 
 ## Bonus — What-If + Regulatory Package (branch: `what-if-regulatory`)
-- [ ] Implement what-if projector that branches at an event type without writing to the real store.
-- [ ] Load real events up to the branch point, inject counterfactual events, then continue with only causally independent real events.
-- [ ] Demonstrate the required scenario where changing risk tier produces a materially different outcome.
-- [ ] Implement generate_regulatory_package to output a self-contained JSON file containing:
+- [ ] Implement what-if projector per brief (never writes to real store):
+- [ ] Load real events up to the branch event type.
+- [ ] Inject counterfactual events instead of the real branch event.
+- [ ] Continue replaying only causally independent real events.
+- [ ] Skip real events causally dependent on the branch.
+- [ ] Return real_outcome, counterfactual_outcome, divergence_events[].
+- [ ] Demonstrate required scenario: change CreditAnalysis risk_tier from MEDIUM to HIGH and show a materially different ApplicationSummary outcome.
+- [ ] Implement generate_regulatory_package(application_id, examination_date) that outputs a self-contained JSON file containing:
 - [ ] Full ordered event stream with payloads.
-- [ ] Projection states as of examination date.
+- [ ] Projection states as of examination_date.
 - [ ] Integrity verification result and hash chain summary.
 - [ ] Human-readable narrative (one sentence per significant event).
 - [ ] Model versions, confidence scores, and input hashes for all contributing agents.

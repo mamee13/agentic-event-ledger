@@ -4,14 +4,39 @@
 
 ---
 
-## 1. Aggregate Boundary Reasoning
+## Aggregate Boundary Reasoning
 
-We split the domain into two primary aggregates: `LoanApplicationAggregate` and `AgentSessionAggregate`. 
+The transition to a multi-aggregate architecture was driven by the need for high-concurrency and strict auditability. Four aggregates were chosen: `LoanApplication`, `AgentSession`, `ComplianceRecord`, `AuditLedger`.
 
-- **LoanApplicationAggregate**: This is the core "Unit of Work." It encompasses everything related to a specific loan's state machine, business rules (like confidence floors), and compliance results. Merging compliance into this aggregate ensures that approvals are atomically blocked unless all checks pass, preventing race conditions where an application might be approved while a compliance failure is being recorded.
-- **AgentSessionAggregate**: This aggregate is decoupled from specific loans. It tracks an agent's lifecycle (context loading, activity status). Splitting this prevents write contention: multiple agents can be active and recording their internal state without locking a specific loan stream until they are ready to contribute a result.
+### Rejected boundary: merging ComplianceRecord into LoanApplication
 
-Keeping these boundaries separate allows for high concurrency during the "Under Review" phase, where multiple AI agents can load their context and prepare analyses in parallel sessions without interfering with each other's persistence.
+The obvious alternative is a single `loan-{id}` stream that contains both loan lifecycle events (`CreditAnalysisRequested`, `DecisionGenerated`, etc.) and compliance rule events (`ComplianceRulePassed`, `ComplianceRuleFailed`). This was rejected.
+
+**The specific coupling failure under concurrent writes:**
+
+The compliance checks (KYC, AML, fraud) are executed by a dedicated `ComplianceAgent` that runs concurrently with the `CreditAnalysisAgent` and `FraudDetectionAgent`. Under the merged boundary, every compliance rule result must be appended to `loan-{id}`. Each append requires acquiring the row-level lock on `event_streams WHERE stream_id = 'loan-{id}'` via `SELECT ... FOR UPDATE`.
+
+With three concurrent agents all targeting the same stream, the collision sequence is:
+
+1. `CreditAnalysisAgent` reads `current_version = 4`, holds the lock, inserts at `stream_position = 5`, commits.
+2. `ComplianceAgent` was also waiting at `expected_version = 4`. It acquires the lock, reads `current_version = 5`, sees a mismatch, raises `OptimisticConcurrencyError`, rolls back.
+3. `ComplianceAgent` reloads the stream (now 5 events), retries with `expected_version = 5`.
+4. Meanwhile `FraudDetectionAgent` also read at version 4 and is retrying at version 5.
+5. One wins; the other retries again.
+
+At 1,000 applications/hour with 3–4 concurrent agents per application, the retry rate on `loan-{id}` streams becomes high enough to cause retry storms. Each retry requires a full stream reload plus re-evaluation of business logic. Under sustained load this degrades write throughput and increases tail latency on the loan lifecycle — the exact stream that the human reviewer and orchestrator are also writing to.
+
+**The fix:** `ComplianceRulePassed` and `ComplianceRuleFailed` go to `compliance-{id}` only. The `ComplianceAgent` never contends with the loan lifecycle. The `LoanApplicationAggregate` reads compliance state lazily at approval time via a single `SELECT` on the compliance stream — no lock held on the loan stream during that read.
+
+### LoanApplication vs. AgentSession
+
+Each agent session is its own aggregate on `agent-{agent_id}-{session_id}`. This enforces the Gas Town pattern (context must be loaded before any analysis event) and means agents record their internal work — context loading, analysis steps, confidence scoring — without ever locking the loan stream. The loan stream lock is only acquired at the moment the agent appends a `CreditAnalysisCompleted` or `DecisionGenerated` event, which is a single atomic write, not a multi-step process.
+
+**Coupling tradeoff:** The causal chain rule (Rule 6) requires that `DecisionGenerated.contributing_agent_sessions[]` references sessions that actually processed this loan. This means the `generate_decision` command handler must load each contributing `AgentSession` stream to verify `contributed_apps` before appending. This is N extra reads (one per contributing session) on the hot path. The tradeoff is accepted: reads are cheap and parallelisable; the alternative (embedding session state in the loan stream) would reintroduce write contention.
+
+### AuditLedger
+
+The `AuditLedger` aggregate lives on `audit-{entity_type}-{entity_id}`. It is append-only and written only by the integrity check process, never by the loan lifecycle or agent session flows. Keeping it separate means the cryptographic hash chain (Phase 5) can be computed and verified without touching any other stream.
 
 ---
 

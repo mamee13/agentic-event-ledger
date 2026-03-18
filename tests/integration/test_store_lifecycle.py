@@ -7,7 +7,7 @@ from ledger.infrastructure.db.connection import get_pool
 from ledger.infrastructure.store import EventStore
 
 
-@pytest.mark.asyncio  # type: ignore[misc]
+@pytest.mark.asyncio
 async def test_event_store_lifecycle() -> None:
     pool = await get_pool()
     store = EventStore(pool)
