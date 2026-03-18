@@ -31,6 +31,20 @@ An event-sourced ledger system designed for AI agents and enterprise auditing.
    uv run pre-commit install
    ```
 
+### Running Migrations
+
+Apply the schema to your Postgres database using `psql`:
+```bash
+psql $DATABASE_URL -f src/ledger/infrastructure/db/schema.sql
+```
+
+Or if you prefer to pass credentials explicitly:
+```bash
+psql -h localhost -U postgres -d ledger -f src/ledger/infrastructure/db/schema.sql
+```
+
+The `DATABASE_URL` variable is set in your `.env` file (see `.env.example`). The schema is idempotent — safe to re-run.
+
 ### Workflow Commands
 - **Run Tests**: `uv run pytest`
 - **Linting**: `uv run ruff check . --fix`

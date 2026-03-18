@@ -20,14 +20,19 @@ async def test_double_decision_concurrency() -> None:
 
     stream_id = f"loan-{uuid4()}"
 
-    # 1. Initial state: Stream at version 0 (after first event)
-    initial_event = BaseEvent(event_type="ApplicationSubmitted", payload={"amount": 1000})
-    await store.append(stream_id, [initial_event], expected_version=-1)
+    # 1. Seed the stream to version 3 (three events already appended)
+    #    This matches the brief scenario: both agents read at version 3.
+    seed_events = [
+        BaseEvent(event_type="ApplicationSubmitted", payload={"amount": 50000}),
+        BaseEvent(event_type="DocumentsUploaded", payload={"docs": ["id", "payslip"]}),
+        BaseEvent(event_type="KYCPassed", payload={"score": 95}),
+    ]
+    await store.append(stream_id, seed_events, expected_version=-1)
 
     current_v = await store.stream_version(stream_id)
-    assert current_v == 1
+    assert current_v == 3
 
-    # 2. Simulate two agents reading version 1 and trying to append simultaneously
+    # 2. Both agents read the stream at version 3 and attempt to append simultaneously
     event_agent_a = BaseEvent(
         event_type="CreditAnalysisCompleted", payload={"agent": "A", "risk": "low"}
     )
@@ -35,27 +40,27 @@ async def test_double_decision_concurrency() -> None:
         event_type="CreditAnalysisCompleted", payload={"agent": "B", "risk": "medium"}
     )
 
-    # Run appends concurrently
+    # Run appends concurrently — both pass expected_version=3
     results = await asyncio.gather(
-        store.append(stream_id, [event_agent_a], expected_version=1),
-        store.append(stream_id, [event_agent_b], expected_version=1),
+        store.append(stream_id, [event_agent_a], expected_version=3),
+        store.append(stream_id, [event_agent_b], expected_version=3),
         return_exceptions=True,
     )
 
     # 3. Assertions
-    # One should succeed (return 2), one should fail (raise OptimisticConcurrencyError)
+    # One should succeed (return 4), one should fail (raise OptimisticConcurrencyError)
     successes = [r for r in results if isinstance(r, int)]
     failures = [r for r in results if isinstance(r, OptimisticConcurrencyError)]
 
     assert len(successes) == 1, f"Expected 1 success, got {len(successes)}: {results}"
     assert len(failures) == 1, f"Expected 1 failure, got {len(failures)}: {results}"
-    assert successes[0] == 2
+    assert successes[0] == 4
 
-    # Verify final stream state
+    # Verify final stream state: total events = 4
     final_v = await store.stream_version(stream_id)
-    assert final_v == 2
+    assert final_v == 4
 
     events = await store.load_stream(stream_id)
-    assert len(events) == 2
+    assert len(events) == 4
 
     await pool.close()
