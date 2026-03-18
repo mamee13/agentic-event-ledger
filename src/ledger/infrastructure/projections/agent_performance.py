@@ -3,7 +3,7 @@ import logging
 import asyncpg
 
 from ledger.core.models import StoredEvent
-from ledger.infrastructure.projections.base import BaseProjection
+from ledger.infrastructure.projections.base import BaseProjection, resolve_model_version
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ class AgentPerformanceProjection(BaseProjection):
                 await self._update_metrics(conn, agent_id, model_version, event, analysis_done=True)
 
         elif e_type == "DecisionGenerated":
-            model_version = model_versions_map.get(agent_id) if agent_id else None
+            model_version = resolve_model_version(model_versions_map, agent_id)
             if agent_id and model_version:
                 recommendation = payload.get("recommendation")
                 confidence = float(payload.get("confidence_score", 0.0))

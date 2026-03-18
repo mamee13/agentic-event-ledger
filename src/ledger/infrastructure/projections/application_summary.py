@@ -3,7 +3,7 @@ import logging
 import asyncpg
 
 from ledger.core.models import StoredEvent
-from ledger.infrastructure.projections.base import BaseProjection
+from ledger.infrastructure.projections.base import BaseProjection, resolve_model_version
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ class ApplicationSummaryProjection(BaseProjection):
         elif e_type == "DecisionGenerated":
             agent_id = payload.get("orchestrator_agent_id")
             model_versions = payload.get("model_versions", {})
-            model_version = model_versions.get(agent_id) if agent_id else None
+            model_version = resolve_model_version(model_versions, agent_id)
             recommendation = payload.get("recommendation")
 
             new_state = "REFERRED"

@@ -105,9 +105,9 @@ def _upcast_decision_v1_v2(payload: dict[str, Any], _recorded_at: datetime) -> d
 
     # model_versions: reconstruct from contributing_agent_sessions if missing.
     # The EventStore passes a pre-built cache via payload["_session_model_cache"]
-    # when available (injected during load). If absent we emit an empty dict and
-    # log a warning — callers that need accurate model_versions should use the
-    # store's load_stream which injects the cache.
+    # when available (injected during load). The cache is dual-keyed by both
+    # session stream id and agent_id (from AgentContextLoaded), so projections
+    # can look up by either key without any string parsing.
     if "model_versions" not in result:
         cache: dict[str, str] = result.pop("_session_model_cache", {})
         sessions: list[str] = result.get("contributing_agent_sessions", [])

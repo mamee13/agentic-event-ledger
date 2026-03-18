@@ -59,7 +59,12 @@ class EventStore:
                 payload = json.loads(payload)
             mv = payload.get("model_version")
             if mv:
+                # Key by stream_id (for upcaster) AND by agent_id (for projections)
+                # so both lookup styles resolve without any string parsing.
                 cache[str(row["stream_id"])] = str(mv)
+                agent_id = payload.get("agent_id")
+                if agent_id:
+                    cache[str(agent_id)] = str(mv)
         return cache
 
     async def _inject_session_cache(self, data: dict[str, Any]) -> dict[str, Any]:
