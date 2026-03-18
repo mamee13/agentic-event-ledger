@@ -74,9 +74,33 @@ Under peak load (100 concurrent applications, 4 agents each), `OptimisticConcurr
 
 > For every inferred field in your upcasters, quantify the likely error rate and the downstream consequence of an incorrect inference. When would you choose null over an inference?
 
-- **model_version**: Inferred from `recorded_at` timestamps using a registry of active models. Low error rate (approx 1%) but critical if a model was swapped mid-second.
-- **regulatory_basis**: Reconstructed from the regulation set active at the time of the event. High confidence as regulatory windows are well-defined.
-- **Confidence scores**: Prefer `null` over inference if not explicitly stored, as hallucinating confidence scores would compromise the audit trail's integrity.
+### CreditAnalysisCompleted v1 → v2
+
+| Field | Strategy | Error Rate | Consequence of Wrong Value | Decision |
+|---|---|---|---|---|
+| `model_version` | Inferred from `recorded_at` using a schedule of model deployment windows | ~1% (model swapped mid-second) | Wrong model attributed in audit trail; compliance report cites incorrect model | Infer — "unknown" fallback is safe and auditable |
+| `confidence_score` | Always `null` | 0% | N/A | **Null** — hallucinating a score would corrupt downstream compliance decisions replayed from history |
+| `regulatory_basis` | Inferred from regulatory schedule active at `recorded_at` | <0.1% (regulatory windows are well-defined) | Wrong regulation cited in audit package | Infer — windows are deterministic and verifiable |
+
+### DecisionGenerated v1 → v2
+
+| Field | Strategy | Error Rate | Consequence | Decision |
+|---|---|---|---|---|
+| `model_versions` | Reconstructed by loading contributing `AgentSession` streams | 0% if sessions exist; 100% if sessions were deleted | Missing model attribution in audit trail | Reconstruct — sessions are immutable append-only streams, deletion is a policy violation |
+
+**Performance tradeoff for `model_versions` reconstruction:**
+Each v1 `DecisionGenerated` upcaster call loads N `AgentSession` streams (one per entry in `contributing_agent_sessions`). On a local DB this adds ~1–5ms per event. For bulk replays (`rebuild_from_scratch`) this is acceptable. For hot-path reads the contributing sessions are typically already in memory. If this becomes a bottleneck, the fix is to persist `model_versions` at write time and only fall back to reconstruction for legacy v1 events. The `EventStore` supports injecting a pre-built `_session_model_cache` dict into the payload before upcasting to avoid redundant DB lookups.
+
+### General rule: null vs inference
+
+Choose **null** when:
+- The field directly affects a compliance decision or audit assertion (wrong value is worse than missing value).
+- The inference source is unavailable or unreliable at upcasting time.
+
+Choose **inference** when:
+- The field is metadata/attribution (model version, regulatory basis).
+- The inference source is deterministic and verifiable (schedule-based, not ML-based).
+- A wrong value is detectable and correctable without corrupting the audit chain.
 
 ---
 

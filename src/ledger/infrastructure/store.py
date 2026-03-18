@@ -6,11 +6,34 @@ import asyncpg
 
 from ledger.core.errors import OptimisticConcurrencyError
 from ledger.core.models import BaseEvent, StoredEvent, StreamMetadata
+from ledger.core.upcasting import UpcasterRegistry
+from ledger.infrastructure.upcasters import registry as _default_registry
 
 
 class EventStore:
-    def __init__(self, pool: asyncpg.Pool):
+    def __init__(
+        self,
+        pool: asyncpg.Pool,
+        upcaster_registry: UpcasterRegistry | None = None,
+    ):
         self._pool = pool
+        self._registry = upcaster_registry if upcaster_registry is not None else _default_registry
+
+    def _apply_upcasting(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Applies registered upcasters to a raw event dict in-memory.
+
+        The DB row is never modified — upcasting is purely a read-time transform.
+        """
+        version, payload = self._registry.upcast(
+            event_type=data["event_type"],
+            event_version=int(data["event_version"]),
+            payload=data["payload"],
+            recorded_at=data["recorded_at"],
+        )
+        data = dict(data)
+        data["event_version"] = version
+        data["payload"] = payload
+        return data
 
     async def append(
         self,
@@ -127,14 +150,13 @@ class EventStore:
         events = []
         for row in rows:
             data = dict(row)
-            # asyncpg correctly handles JSONB as dicts if configured or if using certain versions
-            # but manually parsing for string results is a safe fallback for now.
             payload_val = data["payload"]
             metadata_val = data["metadata"]
             if isinstance(payload_val, str):
                 data["payload"] = json.loads(payload_val)
             if isinstance(metadata_val, str):
                 data["metadata"] = json.loads(metadata_val)
+            data = self._apply_upcasting(data)
             events.append(StoredEvent.model_validate(data))
         return events
 
@@ -169,6 +191,7 @@ class EventStore:
                     data["payload"] = json.loads(p_str)
                 if isinstance(m_str, str):
                     data["metadata"] = json.loads(m_str)
+                data = self._apply_upcasting(data)
                 event = StoredEvent.model_validate(data)
                 yield event
                 current_pos = int(event.global_position)
