@@ -84,3 +84,63 @@ def verify_chain(
         prev_position = check.global_position
 
     return True, "Chain intact."
+
+
+async def run_integrity_check(
+    audit_stream_id: str,
+    store: "EventStore",
+) -> tuple[str, str]:
+    """Appends an AuditIntegrityCheckRun event to the audit stream.
+
+    Loads all events on the stream, finds the last AuditIntegrityCheckRun to
+    get the previous_hash, hashes all events since that check, then appends
+    the new check run event.
+
+    Returns:
+        (new_integrity_hash, previous_hash)
+    """
+    from ledger.core.models import BaseEvent
+
+    events = await store.load_stream(audit_stream_id)
+
+    # Find the last check run to get previous_hash and its position
+    check_runs = [e for e in events if e.event_type == "AuditIntegrityCheckRun"]
+    if check_runs:
+        last_check = check_runs[-1]
+        previous_hash: str = str(last_check.payload.get("integrity_hash", ""))
+        last_check_position = last_check.global_position
+    else:
+        previous_hash = ""
+        last_check_position = 0
+
+    # Hash all events since the last check (excluding check runs themselves)
+    window = [
+        e
+        for e in events
+        if e.global_position > last_check_position and e.event_type != "AuditIntegrityCheckRun"
+    ]
+
+    new_hash = compute_integrity_hash(previous_hash, window)
+
+    # Append the check run event
+    current_version = await store.stream_version(audit_stream_id)
+    expected_version = current_version if current_version != -1 else -1
+
+    check_event = BaseEvent(
+        event_type="AuditIntegrityCheckRun",
+        payload={
+            "integrity_hash": new_hash,
+            "previous_hash": previous_hash,
+            "events_hashed": len(window),
+        },
+    )
+    await store.append(audit_stream_id, [check_event], expected_version=expected_version)
+
+    return new_hash, previous_hash
+
+
+# Avoid circular import — EventStore imports from this module indirectly
+from typing import TYPE_CHECKING  # noqa: E402
+
+if TYPE_CHECKING:
+    from ledger.infrastructure.store import EventStore
