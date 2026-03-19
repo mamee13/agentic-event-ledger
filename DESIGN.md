@@ -74,9 +74,33 @@ Under peak load (100 concurrent applications, 4 agents each), `OptimisticConcurr
 
 > For every inferred field in your upcasters, quantify the likely error rate and the downstream consequence of an incorrect inference. When would you choose null over an inference?
 
-- **model_version**: Inferred from `recorded_at` timestamps using a registry of active models. Low error rate (approx 1%) but critical if a model was swapped mid-second.
-- **regulatory_basis**: Reconstructed from the regulation set active at the time of the event. High confidence as regulatory windows are well-defined.
-- **Confidence scores**: Prefer `null` over inference if not explicitly stored, as hallucinating confidence scores would compromise the audit trail's integrity.
+### CreditAnalysisCompleted v1 → v2
+
+| Field | Strategy | Error Rate | Consequence of Wrong Value | Decision |
+|---|---|---|---|---|
+| `model_version` | Inferred from `recorded_at` using a schedule of model deployment windows | ~1% (model swapped mid-second) | Wrong model attributed in audit trail; compliance report cites incorrect model | Infer — "unknown" fallback is safe and auditable |
+| `confidence_score` | Always `null` | 0% | N/A | **Null** — hallucinating a score would corrupt downstream compliance decisions replayed from history |
+| `regulatory_basis` | Inferred from regulatory schedule active at `recorded_at` | <0.1% (regulatory windows are well-defined) | Wrong regulation cited in audit package | Infer — windows are deterministic and verifiable |
+
+### DecisionGenerated v1 → v2
+
+| Field | Strategy | Error Rate | Consequence | Decision |
+|---|---|---|---|---|
+| `model_versions` | Reconstructed by loading contributing `AgentSession` streams | 0% if sessions exist; 100% if sessions were deleted | Missing model attribution in audit trail | Reconstruct — sessions are immutable append-only streams, deletion is a policy violation |
+
+**Performance tradeoff for `model_versions` reconstruction:**
+Each v1 `DecisionGenerated` upcaster call loads N `AgentSession` streams (one per entry in `contributing_agent_sessions`). On a local DB this adds ~1–5ms per event. For bulk replays (`rebuild_from_scratch`) this is acceptable. For hot-path reads the contributing sessions are typically already in memory. If this becomes a bottleneck, the fix is to persist `model_versions` at write time and only fall back to reconstruction for legacy v1 events. The `EventStore` supports injecting a pre-built `_session_model_cache` dict into the payload before upcasting to avoid redundant DB lookups.
+
+### General rule: null vs inference
+
+Choose **null** when:
+- The field directly affects a compliance decision or audit assertion (wrong value is worse than missing value).
+- The inference source is unavailable or unreliable at upcasting time.
+
+Choose **inference** when:
+- The field is metadata/attribution (model version, regulatory basis).
+- The inference source is deterministic and verifiable (schedule-based, not ML-based).
+- A wrong value is detectable and correctable without corrupting the audit chain.
 
 ---
 
@@ -84,7 +108,31 @@ Under peak load (100 concurrent applications, 4 agents each), `OptimisticConcurr
 
 > Map your PostgreSQL schema to EventStoreDB concepts. What does EventStoreDB give you that your implementation must work harder to achieve?
 
-*To be completed after Phase 4 implementation.*
+### Schema mapping
+
+| This implementation | EventStoreDB concept | Notes |
+|---|---|---|
+| `events.stream_id` | Stream name | Direct equivalent. EventStoreDB uses string stream names; we use the same convention (`loan-{id}`, `agent-{id}-{id}`). |
+| `events.stream_position` | Event number (per-stream) | EventStoreDB calls this the revision. Used identically for optimistic concurrency. |
+| `events.global_position` (BIGSERIAL) | `$all` position | EventStoreDB maintains a global log (`$all`) with a monotonic position. We replicate this with a BIGSERIAL. |
+| `events.event_type` | Event type | Direct equivalent. EventStoreDB uses this for server-side filtering and persistent subscriptions. |
+| `events.payload` (JSONB) | Event data | EventStoreDB stores as bytes with a content-type header. We store as JSONB, which gives us indexed queries at the cost of schema flexibility. |
+| `events.metadata` (JSONB) | Metadata | Direct equivalent. EventStoreDB separates data and metadata at the protocol level; we use a JSONB column. |
+| `event_streams.current_version` | Stream revision | EventStoreDB tracks this internally. We maintain it explicitly in `event_streams` to support `SELECT ... FOR UPDATE` locking. |
+| `outbox` table | Persistent subscriptions / catch-up subscriptions | EventStoreDB delivers events to subscribers natively. We implement at-least-once delivery manually via the outbox pattern. |
+| `projection_checkpoints` | Subscription checkpoint | EventStoreDB checkpoints persistent subscriptions server-side. We store the last processed `global_position` per projection in this table. |
+
+### What EventStoreDB gives you that we work harder to achieve
+
+**Native competing consumers.** EventStoreDB's persistent subscriptions handle fan-out, load balancing, and at-least-once delivery natively. Our outbox table plus `ProjectionDaemon` replicates this but requires us to manage polling, checkpointing, and failure recovery manually.
+
+**Server-side stream filtering.** EventStoreDB can filter the `$all` stream by event type or stream prefix at the server, returning only matching events. Our `load_all` method does this with a SQL `WHERE event_type = ANY(...)` clause, which is functionally equivalent but requires the filter logic to live in application code.
+
+**Optimistic concurrency built into the write protocol.** EventStoreDB's append API accepts an `expectedRevision` parameter and enforces it atomically. We replicate this with `SELECT ... FOR UPDATE` on `event_streams`, which is correct but adds a round-trip and a row lock that EventStoreDB avoids by handling concurrency inside its storage engine.
+
+**Projections as a first-class primitive.** EventStoreDB has a built-in JavaScript projection engine that can emit new events, maintain state, and partition by stream. Our `BaseProjection` + `ProjectionDaemon` covers the same ground but is entirely application-managed.
+
+**Link events and system streams.** EventStoreDB can create `$by-event-type` and `$by-category` system streams automatically, enabling efficient reads like "all `DecisionGenerated` events across all loans." We approximate this with indexed queries on `event_type`, but there is no equivalent of a materialised stream pointer.
 
 ---
 
@@ -92,7 +140,13 @@ Under peak load (100 concurrent applications, 4 agents each), `OptimisticConcurr
 
 > Name the single most significant architectural decision you would reconsider with another full day.
 
-*To be completed at project end.*
+**The compliance clearance write path.**
+
+The current design writes `ComplianceRulePassed` / `ComplianceRuleFailed` to the `compliance-{id}` stream only, then emits a synthetic `ComplianceRulePassed` (with `rule_id = "compliance_clearance"`) to the loan stream when all rules pass. This was the right call for avoiding write contention between the `ComplianceAgent` and the loan lifecycle, but the implementation has a subtle problem: the clearance event is a fabricated event that does not correspond to any real domain fact. It exists purely to advance the loan state machine.
+
+With another day I would introduce a dedicated `ComplianceClearanceIssued` event type — already identified in the missing events catalogue — and emit that to the loan stream instead. This makes the intent explicit in the event catalogue, removes the ambiguity of a `ComplianceRulePassed` event with a synthetic `rule_id`, and gives the `LoanApplicationAggregate` a clean, unambiguous trigger for the `COMPLIANCE_REVIEW → PENDING_DECISION` transition. The `ComplianceRecordAggregate` would emit this event as its terminal event, and the service layer would append it to the loan stream as a cross-stream write — the same pattern already used for `ComplianceCheckRequested`.
+
+The broader lesson: when a state machine transition requires a signal from another aggregate, model that signal as a named domain event rather than reusing an existing event type with a special payload value. The latter works but leaks implementation detail into the event catalogue.
 
 ---
 

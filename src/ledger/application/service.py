@@ -14,6 +14,7 @@ from ledger.core.aggregates import (
     ComplianceRecordAggregate,
     LoanApplicationAggregate,
 )
+from ledger.core.audit_chain import run_integrity_check
 from ledger.core.errors import DomainRuleError
 from ledger.core.models import BaseEvent
 from ledger.infrastructure.store import EventStore
@@ -85,15 +86,20 @@ class LedgerService:
         risk_score: float,
         reasoning: str,
     ) -> None:
-        """Record a completed credit analysis on the loan stream.
+        """Record a completed credit analysis on the loan stream AND the agent session stream.
 
         Rule 3 (model-version locking) is enforced by the loan aggregate.
+        The event is appended to both streams so:
+          - The loan state machine advances to ANALYSIS_COMPLETE.
+          - The AgentSession stream records the contribution, enabling causal chain
+            validation and DecisionGenerated v1→v2 upcasting.
         """
         session = await self._load_session(agent_id, session_id)
         loan = await self._load_loan(loan_id)
 
         event = BaseEvent(
             event_type="CreditAnalysisCompleted",
+            event_version=2,
             payload={
                 "application_id": loan_id,
                 "agent_id": agent_id,
@@ -106,14 +112,24 @@ class LedgerService:
                 "input_data_hash": "sha256-abc123",
                 "reasoning": reasoning,
                 "risk_score_raw": risk_score,
+                "regulatory_basis": "EU-AI-ACT-2025",
             },
         )
+
+        # Capture versions before apply() mutates them
+        loan_version = loan.version
+        session_version = session.version
 
         # Validate rules in-memory before writing
         loan.apply(event)
         session.apply(event)
 
-        await self.store.append(f"loan-{loan_id}", [event], expected_version=loan.version)
+        # Append to loan stream
+        await self.store.append(f"loan-{loan_id}", [event], expected_version=loan_version)
+
+        # Append to agent session stream so contributed_apps is persisted
+        session_stream = f"agent-{agent_id}-{session_id}"
+        await self.store.append(session_stream, [event], expected_version=session_version)
 
     async def request_compliance_check(self, loan_id: str) -> None:
         """Transition loan to COMPLIANCE_REVIEW and open the compliance stream.
@@ -139,12 +155,12 @@ class LedgerService:
         )
 
     async def record_compliance(self, loan_id: str, rule_id: str, status: str) -> None:
-        """Record a compliance rule result on the compliance stream ONLY.
+        """Record a compliance rule result.
 
-        ComplianceRulePassed / ComplianceRuleFailed go ONLY to the compliance stream.
-        The loan aggregate reads compliance state lazily at approval time -- it does NOT
-        receive these events directly. This prevents write contention between the
-        compliance agent and the loan lifecycle.
+        ComplianceRulePassed / ComplianceRuleFailed go to the compliance stream.
+        When all rules pass, a ComplianceRulePassed event is also appended to the
+        loan stream so the loan state machine advances from COMPLIANCE_REVIEW to
+        PENDING_DECISION.
         """
         compliance = await self._load_compliance(loan_id)
 
@@ -161,6 +177,28 @@ class LedgerService:
         comp_expected = compliance.version if compliance.version >= 0 else -1
         await self.store.append(f"compliance-{loan_id}", [event], expected_version=comp_expected)
 
+        # Apply the result in-memory to check if all rules now pass
+        was_passed = compliance.is_passed
+        compliance.apply(event)
+
+        # Emit clearance to loan stream only on False → True transition
+        if not was_passed and compliance.is_passed:
+            loan = await self._load_loan(loan_id)
+            loan_clearance = BaseEvent(
+                event_type="ComplianceRulePassed",
+                payload={
+                    "application_id": loan_id,
+                    "rule_id": "compliance_clearance",
+                    "rule_version": "1.0",
+                },
+            )
+            # Capture version before apply() increments it, then validate
+            loan_version = loan.version
+            loan.apply(loan_clearance)
+            await self.store.append(
+                f"loan-{loan_id}", [loan_clearance], expected_version=loan_version
+            )
+
     async def generate_decision(
         self,
         loan_id: str,
@@ -175,6 +213,9 @@ class LedgerService:
         Rule 6 (causal chain): all contributing sessions must have processed this loan.
         Rule 2 (confidence floor): confidence < 0.6 forces REFER.
         Rule 4 (state machine): only valid from PENDING_DECISION.
+
+        The event is appended to both the loan stream and the agent session stream so
+        contributed_apps is persisted and Decision upcasting has accurate session data.
         """
         session = await self._load_session(agent_id, session_id)
         loan = await self._load_loan(loan_id)
@@ -188,8 +229,17 @@ class LedgerService:
 
         loan.validate_causal_chain(linked)
 
+        # Build model_versions from all contributing sessions + orchestrator
+        model_versions: dict[str, str] = {
+            c_sess.agent_id: c_sess.model_version
+            for c_sess in linked
+            if c_sess.agent_id and c_sess.model_version
+        }
+        model_versions[agent_id] = session.model_version or "unknown"
+
         event = BaseEvent(
             event_type="DecisionGenerated",
+            event_version=2,
             payload={
                 "application_id": loan_id,
                 "orchestrator_agent_id": agent_id,
@@ -199,14 +249,23 @@ class LedgerService:
                     f"agent-{c['agent_id']}-{c['session_id']}" for c in contributing_sessions
                 ],
                 "decision_basis_summary": "All agents agree",
-                "model_versions": {agent_id: session.model_version},
+                "model_versions": model_versions,
             },
         )
+
+        # Capture versions before apply() mutates them
+        loan_version = loan.version
+        session_version = session.version
 
         loan.apply(event)
         session.apply(event)
 
-        await self.store.append(f"loan-{loan_id}", [event], expected_version=loan.version)
+        # Append to loan stream
+        await self.store.append(f"loan-{loan_id}", [event], expected_version=loan_version)
+
+        # Append to agent session stream so contributed_apps is persisted
+        session_stream = f"agent-{agent_id}-{session_id}"
+        await self.store.append(session_stream, [event], expected_version=session_version)
 
     async def record_human_review(
         self,
@@ -277,3 +336,11 @@ class LedgerService:
             payload={"application_id": loan_id},
         )
         await self.store.append(f"loan-{loan_id}", [event], expected_version=loan.version)
+
+    async def run_audit_integrity_check(self, loan_id: str) -> tuple[str, str]:
+        """Run a cryptographic integrity check on the loan's audit stream.
+
+        Appends an AuditIntegrityCheckRun event to audit-loan-{loan_id} and
+        returns (new_integrity_hash, previous_hash).
+        """
+        return await run_integrity_check(f"audit-loan-{loan_id}", self.store)
