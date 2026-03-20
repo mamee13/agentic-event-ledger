@@ -164,7 +164,7 @@ async def test_run_integrity_check_appends_event() -> None:
     data_event = _make_event("ApplicationSubmitted", {"application_id": "a1"}, global_position=1)
 
     store = AsyncMock()
-    store.load_stream = AsyncMock(return_value=[data_event])
+    store.load_stream_raw = AsyncMock(return_value=[data_event])
     store.stream_version = AsyncMock(return_value=1)
     store.append = AsyncMock(return_value=2)
 
@@ -198,7 +198,7 @@ async def test_run_integrity_check_chains_from_previous() -> None:
     e2 = _make_event("SomeEvent", {"x": 2}, global_position=3)
 
     store = AsyncMock()
-    store.load_stream = AsyncMock(return_value=[e1, c1, e2])
+    store.load_stream_raw = AsyncMock(return_value=[e1, c1, e2])
     store.stream_version = AsyncMock(return_value=3)
     store.append = AsyncMock(return_value=4)
 

@@ -101,7 +101,7 @@ async def run_integrity_check(
     """
     from ledger.core.models import BaseEvent
 
-    events = await store.load_stream(audit_stream_id)
+    events = await store.load_stream_raw(audit_stream_id)
 
     # Find the last check run to get previous_hash and its position
     check_runs = [e for e in events if e.event_type == "AuditIntegrityCheckRun"]

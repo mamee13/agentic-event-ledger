@@ -46,11 +46,11 @@ async def test_audit_chain_write_and_verify() -> None:
     assert h2 != h1
 
     # Verify the full chain is intact
-    all_events = await store.load_stream(stream_id)
-    check_runs = [e for e in all_events if e.event_type == "AuditIntegrityCheckRun"]
+    all_events_raw = await store.load_stream_raw(stream_id)
+    check_runs = [e for e in all_events_raw if e.event_type == "AuditIntegrityCheckRun"]
     assert len(check_runs) == 2
 
-    ok, msg = verify_chain(check_runs, all_events)
+    ok, msg = verify_chain(check_runs, all_events_raw)
     assert ok, msg
 
     await pool.close()
