@@ -245,6 +245,41 @@ class EventStore:
                 yield event
                 current_pos = int(event.global_position)
 
+    async def load_stream_raw(
+        self,
+        stream_id: str,
+        from_position: int = 0,
+        to_position: int | None = None,
+    ) -> list[StoredEvent]:
+        """Loads events from a stream without applying upcasting.
+
+        Used by the audit chain so hashes are computed over the exact bytes
+        stored in the DB — making the chain independently verifiable without
+        needing to run the upcaster pipeline.
+        """
+        query = "SELECT * FROM events WHERE stream_id = $1 AND stream_position > $2"
+        params: list[Any] = [stream_id, from_position]
+
+        if to_position:
+            query += " AND stream_position <= $3"
+            params.append(to_position)
+
+        query += " ORDER BY stream_position ASC"
+
+        rows = await self._pool.fetch(query, *params)
+        events = []
+        for row in rows:
+            data = dict(row)
+            payload_val = data["payload"]
+            metadata_val = data["metadata"]
+            if isinstance(payload_val, str):
+                data["payload"] = json.loads(payload_val)
+            if isinstance(metadata_val, str):
+                data["metadata"] = json.loads(metadata_val)
+            # No _inject_session_cache, no _apply_upcasting
+            events.append(StoredEvent.model_validate(data))
+        return events
+
     async def stream_version(self, stream_id: str) -> int:
         version = await self._pool.fetchval(
             "SELECT current_version FROM event_streams WHERE stream_id = $1", stream_id

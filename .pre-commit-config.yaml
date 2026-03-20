@@ -10,4 +10,4 @@ repos:
     rev: v1.15.0
     hooks:
       - id: mypy
-        additional_dependencies: [pydantic, pydantic-settings, asyncpg, structlog, pytest, pytest-asyncio]
+        additional_dependencies: [pydantic, pydantic-settings, asyncpg, structlog, pytest, pytest-asyncio, mcp]
