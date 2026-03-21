@@ -52,6 +52,19 @@ class CreditState(TypedDict):
 
 
 class CreditAnalysisAgent(BaseApexAgent):
+    def __init__(
+        self,
+        agent_id: str,
+        agent_type: str,
+        store: Any,
+        registry: Any,
+        model: str | None = None,
+    ):
+        import os
+
+        m = model or os.environ.get("CREDIT_AGENT_MODEL")
+        super().__init__(agent_id, agent_type, store, registry, model=m)
+
     def build_graph(self) -> Any:
         g = StateGraph(CreditState)
         g.add_node("validate_inputs", self._node_validate_inputs)

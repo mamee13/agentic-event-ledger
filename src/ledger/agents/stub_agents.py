@@ -35,6 +35,19 @@ class DocProcState(TypedDict):
 class DocumentProcessingAgent(BaseApexAgent):
     """Wraps the Week 3 Document Intelligence pipeline as a LangGraph agent."""
 
+    def __init__(
+        self,
+        agent_id: str,
+        agent_type: str,
+        store: Any,
+        registry: Any,
+        model: str | None = None,
+    ):
+        import os
+
+        m = model or os.environ.get("DOC_AGENT_MODEL")
+        super().__init__(agent_id, agent_type, store, registry, model=m)
+
     def build_graph(self) -> Any:
         g = StateGraph(DocProcState)
         g.add_node("validate_inputs", self._node_validate_inputs)
@@ -325,6 +338,19 @@ class FraudState(TypedDict):
 
 class FraudDetectionAgent(BaseApexAgent):
     """Cross-references extracted document facts against historical registry data."""
+
+    def __init__(
+        self,
+        agent_id: str,
+        agent_type: str,
+        store: Any,
+        registry: Any,
+        model: str | None = None,
+    ):
+        import os
+
+        m = model or os.environ.get("FRAUD_AGENT_MODEL")
+        super().__init__(agent_id, agent_type, store, registry, model=m)
 
     def build_graph(self) -> Any:
         g = StateGraph(FraudState)
@@ -687,6 +713,19 @@ REGULATIONS: dict[str, Any] = {
 class ComplianceAgent(BaseApexAgent):
     """Evaluates 6 deterministic regulatory rules. No LLM in decision path."""
 
+    def __init__(
+        self,
+        agent_id: str,
+        agent_type: str,
+        store: Any,
+        registry: Any,
+        model: str | None = None,
+    ):
+        import os
+
+        m = model or os.environ.get("COMPLIANCE_AGENT_MODEL")
+        super().__init__(agent_id, agent_type, store, registry, model=m)
+
     def build_graph(self) -> Any:
         g = StateGraph(ComplianceState)
         g.add_node("validate_inputs", self._node_validate_inputs)
@@ -981,6 +1020,19 @@ class OrchestratorState(TypedDict):
 
 class DecisionOrchestratorAgent(BaseApexAgent):
     """Synthesises all prior agent outputs into a final recommendation."""
+
+    def __init__(
+        self,
+        agent_id: str,
+        agent_type: str,
+        store: Any,
+        registry: Any,
+        model: str | None = None,
+    ):
+        import os
+
+        m = model or os.environ.get("DECISION_AGENT_MODEL")
+        super().__init__(agent_id, agent_type, store, registry, model=m)
 
     def build_graph(self) -> Any:
         g = StateGraph(OrchestratorState)

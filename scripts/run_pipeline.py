@@ -55,13 +55,39 @@ async def run_phase(app_id: str, phase: str) -> None:
 
         agents = {
             "document": DocumentProcessingAgent(
-                "agent-doc-001", "document_processing", store, registry
+                "agent-doc-001",
+                "document_processing",
+                store,
+                registry,
+                model=os.environ.get("DOC_AGENT_MODEL"),
             ),
-            "credit": CreditAnalysisAgent("agent-credit-001", "credit_analysis", store, registry),
-            "fraud": FraudDetectionAgent("agent-fraud-001", "fraud_detection", store, registry),
-            "compliance": ComplianceAgent("agent-compliance-001", "compliance", store, registry),
+            "credit": CreditAnalysisAgent(
+                "agent-credit-001",
+                "credit_analysis",
+                store,
+                registry,
+                model=os.environ.get("CREDIT_AGENT_MODEL"),
+            ),
+            "fraud": FraudDetectionAgent(
+                "agent-fraud-001",
+                "fraud_detection",
+                store,
+                registry,
+                model=os.environ.get("FRAUD_AGENT_MODEL"),
+            ),
+            "compliance": ComplianceAgent(
+                "agent-compliance-001",
+                "compliance",
+                store,
+                registry,
+                model=os.environ.get("COMPLIANCE_AGENT_MODEL"),
+            ),
             "decision": DecisionOrchestratorAgent(
-                "agent-orch-001", "decision_orchestrator", store, registry
+                "agent-orch-001",
+                "decision_orchestrator",
+                store,
+                registry,
+                model=os.environ.get("DECISION_AGENT_MODEL"),
             ),
         }
 
@@ -78,6 +104,7 @@ async def run_phase(app_id: str, phase: str) -> None:
         for p in phases_to_run:
             print(f"\n{'=' * 60}")
             print(f"Running phase: {p.upper()} for application: {app_id}")
+            print(f"Using model: {agents[p].model}")
             print(f"{'=' * 60}")
             try:
                 await agents[p].process_application(app_id)
