@@ -668,7 +668,8 @@ REGULATIONS: dict[str, Any] = {
         "name": "Minimum Operating History",
         "version": "2026-Q1-v1",
         "is_hard_block": True,
-        "check": lambda co: (2024 - (co.get("founded_year") or 2024)) >= 2,
+        "check": lambda co: (datetime.now().year - (co.get("founded_year") or datetime.now().year))
+        >= 2,
         "failure_reason": "Business must have at least 2 years of operating history.",
         "remediation": None,
     },
@@ -709,12 +710,12 @@ class ComplianceAgent(BaseApexAgent):
         async def _reg006(s: ComplianceState) -> Any:
             return await self._evaluate_rule(s, "REG-006")
 
-        g.add_node("evaluate_reg001", _reg001)
-        g.add_node("evaluate_reg002", _reg002)
-        g.add_node("evaluate_reg003", _reg003)
-        g.add_node("evaluate_reg004", _reg004)
-        g.add_node("evaluate_reg005", _reg005)
-        g.add_node("evaluate_reg006", _reg006)
+        g.add_node("evaluate_reg001", cast(Any, _reg001))
+        g.add_node("evaluate_reg002", cast(Any, _reg002))
+        g.add_node("evaluate_reg003", cast(Any, _reg003))
+        g.add_node("evaluate_reg004", cast(Any, _reg004))
+        g.add_node("evaluate_reg005", cast(Any, _reg005))
+        g.add_node("evaluate_reg006", cast(Any, _reg006))
         g.add_node("write_output", self._node_write_output)
 
         g.set_entry_point("validate_inputs")
@@ -1254,7 +1255,7 @@ class DecisionOrchestratorAgent(BaseApexAgent):
                 event_type="HumanReviewRequested",
                 payload={
                     "application_id": app_id,
-                    "reason": f"Constraints applied: {applied}",
+                    "reason": f"Recommendation: {recommendation}. Constraints applied: {applied}",
                     "requested_at": datetime.now().isoformat(),
                 },
             )

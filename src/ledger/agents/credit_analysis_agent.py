@@ -156,7 +156,7 @@ class CreditAnalysisAgent(BaseApexAgent):
             },
         )
         # New stream — expected_version = -1
-        await self.store.append(f"credit-{app_id}", [event], expected_version=-1)
+        await self.store.append(stream_id=f"credit-{app_id}", events=[event], expected_version=-1)
         ms = int((time.time() - t) * 1000)
         await self._record_node_execution(
             "open_credit_record",

@@ -306,7 +306,7 @@ class BaseApexAgent(ABC):
                     await asyncio.sleep(0.1 * (2**attempt))
                     continue
                 raise
-        return []
+        return []  # pragma: no cover
 
     # ── LLM call via OpenRouter ───────────────────────────────────────────────
 
@@ -349,7 +349,7 @@ class BaseApexAgent(ABC):
 
     @staticmethod
     def _sha(d: object) -> str:
-        return hashlib.sha256(json.dumps(str(d), sort_keys=True).encode()).hexdigest()[:16]
+        return hashlib.sha256(json.dumps(d, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
     @staticmethod
     def _parse_json(content: str) -> dict[str, Any]:
