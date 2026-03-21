@@ -1,7 +1,10 @@
 -- The Ledger Event Store Schema
 -- Optimized for high-throughput appends and global position replay.
 
--- Enable UUID extension if not already present
+-- gen_random_uuid() is provided by pgcrypto (not uuid-ossp) in Postgres < 13.
+-- In Postgres 13+ it is a built-in, but enabling pgcrypto is harmless and
+-- ensures compatibility across all supported versions.
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 CREATE TABLE IF NOT EXISTS events (  

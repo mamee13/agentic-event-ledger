@@ -285,6 +285,8 @@ async def record_credit_analysis(
             risk_score=confidence_score,
             reasoning=reasoning,
             analysis_duration_ms=analysis_duration_ms,
+            risk_tier=risk_tier,
+            confidence_score=confidence_score,
         )
     except Exception as exc:
         return _err(from_exception(exc, loan_stream))

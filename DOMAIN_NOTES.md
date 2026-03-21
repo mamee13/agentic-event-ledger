@@ -169,3 +169,19 @@ A **coordinator process** (or the nodes themselves via leader election using `pg
 The key difference from Marten: Marten's daemon is built into the framework with battle-tested shard rebalancing. The Python equivalent requires explicit implementation of the heartbeat, leader election, and shard assignment logic — more code, same pattern.
 
 **Inference strategy for `model_version`:** The model deployment history is a known, auditable external record (deployment logs, MLflow registry). Mapping `recorded_at` to a model version is a deterministic lookup, not a guess. The error rate is low for events with accurate timestamps; it is zero for events after version tracking was introduced.
+
+---
+
+## 7. Missing Events in the Event Catalogue
+
+The challenge event catalogue is intentionally incomplete. The following events are missing and must be added:
+
+| Missing Event | Aggregate / Stream | Why It Is Needed |
+|---|---|---|
+| `FraudScreeningRequested` | `LoanApplication` | Symmetry with `CreditAnalysisRequested` — the loan stream must record when fraud screening was initiated, not just when it completed. Without it, the audit trail has no record of the intent, only the outcome. |
+| `AgentSessionClosed` | `AgentSession` | A session needs a terminal event to mark it as complete. Without it, `reconstruct_agent_context()` cannot distinguish an active session from an abandoned one — both look identical in the stream. |
+| `ComplianceClearanceIssued` | `ComplianceRecord` | The aggregate needs a named terminal event confirming all required checks passed. Using `ComplianceRulePassed` with a synthetic `rule_id = "compliance_clearance"` leaks implementation detail into the catalogue and makes the event ambiguous. |
+| `ApplicationWithdrawn` | `LoanApplication` | Applicants can withdraw before a decision. The state machine has no transition to a terminal state without approval or decline, leaving withdrawn applications stuck in an intermediate state forever. |
+| `HumanReviewOverride` | `LoanApplication` | Business rule 3 (model-version locking) references a human override as the only way to supersede a completed credit analysis. The event is referenced in the rules but not defined in the catalogue. |
+| `DecisionOrchestratorSessionStarted` | `AgentSession` | The `DecisionOrchestrator` is itself an agent and must follow the Gas Town pattern. It needs an `AgentContextLoaded`-equivalent to start its session, but the catalogue has no event for orchestrator session initialisation. |
+| `AuditStreamInitialised` | `AuditLedger` | The audit stream needs an identity event recording what entity it covers and when monitoring began. Without it, the first event on the stream is always a domain event rather than a stream-level fact. |
