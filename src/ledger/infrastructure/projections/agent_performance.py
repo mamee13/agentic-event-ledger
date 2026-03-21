@@ -14,7 +14,7 @@ class AgentPerformanceProjection(BaseProjection):
 
     @property
     def projection_name(self) -> str:
-        return "AgentPerformance"
+        return "AgentPerformanceLedger"
 
     @property
     def subscribed_events(self) -> list[str]:

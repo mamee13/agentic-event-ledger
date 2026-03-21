@@ -46,7 +46,7 @@ async def test_projections_performance_slo() -> None:
                         "requested_amount_usd": 1000.0 * (i + 1),
                     },
                 )
-                await store.append(f"application-{app_id}", [event], expected_version=-1)
+                await store.append(f"loan-{app_id}", [event], expected_version=-1)
 
         print(f"Starting {num_handlers} concurrent handlers...")
         start_burst = time.perf_counter()
