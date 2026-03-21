@@ -41,7 +41,15 @@ class AgenticLedgerError(Exception):
 class OptimisticConcurrencyError(AgenticLedgerError):
     """Raised when an optimistic concurrency check fails."""
 
+    # Declared structured fields — accessible directly on the exception instance
+    stream_id: str
+    expected_version: int
+    actual_version: int
+
     def __init__(self, stream_id: str, expected_version: int, actual_version: int):
+        self.stream_id = stream_id
+        self.expected_version = expected_version
+        self.actual_version = actual_version
         message = (
             f"Concurrency conflict on stream {stream_id}. "
             f"Expected {expected_version}, found {actual_version}."
@@ -58,7 +66,11 @@ class OptimisticConcurrencyError(AgenticLedgerError):
         )
 
 
-class DomainRuleError(AgenticLedgerError):
+class DomainError(AgenticLedgerError):
+    """Base exception for all domain-related errors."""
+
+
+class DomainRuleError(DomainError):
     """Raised when a business rule is violated in an aggregate."""
 
     def __init__(self, rule_name: str, message: str, suggested_action: str | None = None):

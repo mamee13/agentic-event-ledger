@@ -56,11 +56,15 @@ async def test_double_decision_concurrency() -> None:
     assert len(failures) == 1, f"Expected 1 failure, got {len(failures)}: {results}"
     assert successes[0] == 4
 
-    # Verify final stream state: total events = 4
+    # Verify final stream state: total events = 4 (3 seed + 1 winner)
     final_v = await store.stream_version(stream_id)
     assert final_v == 4
 
     events = await store.load_stream(stream_id)
     assert len(events) == 4
+
+    # The winning event must occupy stream_position 4
+    winning_event = events[-1]
+    assert winning_event.stream_position == 4
 
     await pool.close()

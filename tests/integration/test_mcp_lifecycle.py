@@ -220,6 +220,11 @@ async def test_full_mcp_lifecycle() -> None:
     assert bad["ok"] is False
     assert bad["error"]["error_type"] == "VALIDATION_ERROR"
 
+    # Ensure projections are updated
+    daemon = mcp_server._daemon
+    assert daemon is not None
+    await daemon._process_batch()
+
     # ------------------------------------------------------------------ 9. query compliance view
     compliance_proj = mcp_server._compliance
     assert compliance_proj is not None
@@ -247,8 +252,8 @@ async def test_integrity_check_requires_compliance_role() -> None:
 async def test_integrity_check_rate_limited() -> None:
     from ledger.mcp.rate_limit import RateLimiter
 
-    # Use a fresh limiter with 0-second window so second call is always blocked
-    limiter = RateLimiter(calls=1, period_seconds=0.0)
+    # Use a fresh limiter with 60-second window so second call is always blocked
+    limiter = RateLimiter(calls=1, period_seconds=60.0)
     entity_id = str(uuid4())
     key = f"loan:{entity_id}"
     assert limiter.is_allowed(key) is True
