@@ -86,6 +86,8 @@ class LedgerService:
         risk_score: float,
         reasoning: str,
         analysis_duration_ms: int = 0,
+        risk_tier: str = "MEDIUM",
+        confidence_score: float = 0.85,
     ) -> None:
         """Record a completed credit analysis on the loan stream AND the agent session stream.
 
@@ -106,8 +108,8 @@ class LedgerService:
                 "agent_id": agent_id,
                 "session_id": session_id,
                 "model_version": session.model_version,
-                "confidence_score": 0.85,
-                "risk_tier": "MEDIUM",
+                "confidence_score": confidence_score,
+                "risk_tier": risk_tier,
                 "recommended_limit_usd": 50000.0,
                 "analysis_duration_ms": analysis_duration_ms,
                 "input_data_hash": "sha256-abc123",
