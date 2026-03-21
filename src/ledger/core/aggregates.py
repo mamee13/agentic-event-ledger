@@ -1,6 +1,6 @@
-from abc import ABC, abstractmethod
+from abc import ABC
 from enum import StrEnum
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar
 
 from ledger.core.errors import DomainRuleError
 from ledger.core.models import BaseEvent, StoredEvent
@@ -9,7 +9,6 @@ if TYPE_CHECKING:
     from ledger.infrastructure.store import EventStore
 
 T = TypeVar("T")
-Self = TypeVar("Self", bound="BaseAggregate[object]")
 
 # Re-export DomainRuleError as DomainError so existing tests keep working
 DomainError = DomainRuleError
@@ -32,13 +31,21 @@ class BaseAggregate(ABC, Generic[T]):
             self.changes.append(event)
             self.version += 1
 
-    @abstractmethod
     def _apply_to_state(self, event: BaseEvent | StoredEvent) -> None:
-        """Handles state transitions for specific events."""
-        pass
+        """Dispatches the event to a specific handler method."""
+        method_name = f"_apply_{self._to_snake_case(event.event_type)}"
+        handler = getattr(self, method_name, None)
+        if handler:
+            handler(event)
+
+    def _to_snake_case(self, name: str) -> str:
+        """Converts PascalCase event type to snake_case."""
+        import re
+
+        return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
     @classmethod
-    async def load(cls, id: str, store: "EventStore") -> "BaseAggregate[T]":
+    async def load(cls, id: str, store: "EventStore") -> Self:
         """Replays the stream to rehydrate the aggregate and sets its version."""
         events = await store.load_stream(id)
         aggregate = cls(id)
@@ -73,13 +80,6 @@ class LoanApplicationAggregate(BaseAggregate[LoanState]):
       → FINAL_APPROVED | FINAL_DECLINED
     """
 
-    @classmethod
-    async def load(cls, id: str, store: "EventStore") -> "LoanApplicationAggregate":
-        events = await store.load_stream(id)
-        agg = cls(id)
-        agg.load_from_history(events)
-        return agg
-
     def __init__(self, loan_id: str):
         super().__init__(loan_id)
         self.state: LoanState = LoanState.SUBMITTED
@@ -88,134 +88,140 @@ class LoanApplicationAggregate(BaseAggregate[LoanState]):
         self.is_compliance_passed: bool = False
         self.contributing_sessions: list[str] = []
 
-    def _apply_to_state(self, event: BaseEvent | StoredEvent) -> None:  # noqa: C901
-        e_type = event.event_type
+    # ------------------------------------------------------------------ dispatch
 
-        if e_type == "ApplicationSubmitted":
-            # Explicit handler: sets initial state on replay
-            self.state = LoanState.SUBMITTED
+    def _apply_application_submitted(self, _event: BaseEvent | StoredEvent) -> None:
+        self.state = LoanState.SUBMITTED
 
-        elif e_type == "CreditAnalysisRequested":
-            if self.state != LoanState.SUBMITTED:
-                raise DomainRuleError(
-                    rule_name="state_machine",
-                    message=f"CreditAnalysisRequested invalid from state {self.state}",
-                    suggested_action="Only request analysis from SUBMITTED state.",
-                )
-            self.state = LoanState.AWAITING_ANALYSIS
+    def _apply_credit_analysis_requested(self, _event: BaseEvent | StoredEvent) -> None:
+        self.state = LoanState.AWAITING_ANALYSIS
 
-        elif e_type == "CreditAnalysisCompleted":
-            # Rule 3: model-version locking — reject second analysis unless human override
-            if self.model_versions and not self.has_human_override:
-                raise DomainRuleError(
-                    rule_name="model_version_locking",
-                    message=(
-                        f"Rule 3 Violation: Rejecting further analysis for application {self.id} "
-                        "without human override."
-                    ),
-                    suggested_action="A HumanReviewCompleted with override=True is required.",
-                )
-            if self.state not in (LoanState.AWAITING_ANALYSIS, LoanState.ANALYSIS_COMPLETE):
-                raise DomainRuleError(
-                    rule_name="state_machine",
-                    message=f"CreditAnalysisCompleted invalid from state {self.state}",
-                )
-            mod_ver = event.payload.get("model_version")
-            if mod_ver:
-                self.model_versions.add(str(mod_ver))
-            self.state = LoanState.ANALYSIS_COMPLETE
+    def _apply_credit_analysis_completed(self, event: BaseEvent | StoredEvent) -> None:
+        mod_ver = event.payload.get("model_version")
+        if mod_ver:
+            self.model_versions.add(str(mod_ver))
+        self.state = LoanState.ANALYSIS_COMPLETE
 
-        elif e_type == "ComplianceCheckRequested":
-            if self.state != LoanState.ANALYSIS_COMPLETE:
-                raise DomainRuleError(
-                    rule_name="state_machine",
-                    message=f"ComplianceCheckRequested invalid from state {self.state}",
-                )
-            self.state = LoanState.COMPLIANCE_REVIEW
+    def _apply_compliance_check_requested(self, _event: BaseEvent | StoredEvent) -> None:
+        self.state = LoanState.COMPLIANCE_REVIEW
 
-        elif e_type == "ComplianceRulePassed":
-            if self.state != LoanState.COMPLIANCE_REVIEW:
-                raise DomainRuleError(
-                    rule_name="state_machine",
-                    message=f"ComplianceRulePassed invalid from state {self.state}",
-                )
-            self.is_compliance_passed = True
-            self.state = LoanState.PENDING_DECISION
+    def _apply_compliance_rule_passed(self, _event: BaseEvent | StoredEvent) -> None:
+        self.is_compliance_passed = True
+        self.state = LoanState.PENDING_DECISION
 
-        elif e_type == "ComplianceRuleFailed":
-            if self.state != LoanState.COMPLIANCE_REVIEW:
-                raise DomainRuleError(
-                    rule_name="state_machine",
-                    message=f"ComplianceRuleFailed invalid from state {self.state}",
-                )
-            self.is_compliance_passed = False
-            # Stay in COMPLIANCE_REVIEW — must be resolved before proceeding
+    def _apply_compliance_rule_failed(self, _event: BaseEvent | StoredEvent) -> None:
+        self.is_compliance_passed = False
 
-        elif e_type == "DecisionGenerated":
-            # Rule 4: must be in PENDING_DECISION
-            if self.state != LoanState.PENDING_DECISION:
-                raise DomainRuleError(
-                    rule_name="state_machine",
-                    message=(
-                        f"DecisionGenerated only allowed from PENDING_DECISION "
-                        f"(current: {self.state})"
-                    ),
-                )
-            contribs = event.payload.get("contributing_agent_sessions", [])
-            if not contribs:
-                raise DomainRuleError(
-                    rule_name="causal_chain",
-                    message="DecisionGenerated must have contributing_agent_sessions",
-                )
-            self.contributing_sessions = list(contribs)
-
-            # Rule 2: confidence floor — score < 0.6 forces REFER
-            confidence = event.payload.get("confidence_score")
-            if confidence is not None and float(confidence) < 0.6:
-                self.state = LoanState.REFERRED
+    def _apply_decision_generated(self, event: BaseEvent | StoredEvent) -> None:
+        self.contributing_sessions = list(event.payload.get("contributing_agent_sessions", []))
+        confidence = event.payload.get("confidence_score")
+        if confidence is not None and float(confidence) < 0.6:
+            self.state = LoanState.REFERRED
+        else:
+            rec = event.payload.get("recommendation")
+            if rec == "APPROVE":
+                self.state = LoanState.APPROVED_PENDING_HUMAN
+            elif rec == "DECLINE":
+                self.state = LoanState.DECLINED_PENDING_HUMAN
             else:
-                rec = event.payload.get("recommendation")
-                if rec == "APPROVE":
-                    self.state = LoanState.APPROVED_PENDING_HUMAN
-                elif rec == "DECLINE":
-                    self.state = LoanState.DECLINED_PENDING_HUMAN
-                else:
-                    self.state = LoanState.REFERRED
+                self.state = LoanState.REFERRED
 
-        elif e_type == "HumanReviewCompleted":
-            valid_states = {
-                LoanState.APPROVED_PENDING_HUMAN,
-                LoanState.DECLINED_PENDING_HUMAN,
-                LoanState.REFERRED,
-            }
-            if self.state not in valid_states:
-                raise DomainRuleError(
-                    rule_name="state_machine",
-                    message=f"HumanReviewCompleted invalid from state {self.state}",
-                )
-            self.has_human_override = bool(event.payload.get("override", False))
-            final_decision = event.payload.get("final_decision")
-            if final_decision == "APPROVE":
-                self.state = LoanState.FINAL_APPROVED
-            elif final_decision == "DECLINE":
-                self.state = LoanState.FINAL_DECLINED
-            # If final_decision is absent/other, state stays (e.g. REFERRED awaiting re-decision)
-
-        elif e_type == "ApplicationApproved":
-            # Rule 5: compliance dependency — must be cleared before approval
-            if not self.is_compliance_passed:
-                raise DomainRuleError(
-                    rule_name="compliance_dependency",
-                    message=(
-                        f"Rule 5 Violation: ApplicationApproved blocked for {self.id}; "
-                        "ComplianceRecord stream is not PASSED"
-                    ),
-                    suggested_action="Ensure all ComplianceRulePassed events are recorded first.",
-                )
+    def _apply_human_review_completed(self, event: BaseEvent | StoredEvent) -> None:
+        self.has_human_override = bool(event.payload.get("override", False))
+        final_decision = event.payload.get("final_decision")
+        if final_decision == "APPROVE":
             self.state = LoanState.FINAL_APPROVED
-
-        elif e_type == "ApplicationDeclined":
+        elif final_decision == "DECLINE":
             self.state = LoanState.FINAL_DECLINED
+
+    def _apply_application_approved(self, _event: BaseEvent | StoredEvent) -> None:
+        self.state = LoanState.FINAL_APPROVED
+
+    def _apply_application_declined(self, _event: BaseEvent | StoredEvent) -> None:
+        self.state = LoanState.FINAL_DECLINED
+
+    # ------------------------------------------------------------------ guards
+
+    def guard_request_credit_analysis(self) -> None:
+        if self.state != LoanState.SUBMITTED:
+            raise DomainRuleError(
+                rule_name="state_machine",
+                message=f"CreditAnalysisRequested invalid from state {self.state}",
+                suggested_action="Only request analysis from SUBMITTED state.",
+            )
+
+    def guard_record_credit_analysis(self) -> None:
+        if self.model_versions and not self.has_human_override:
+            raise DomainRuleError(
+                rule_name="model_version_locking",
+                message=(
+                    f"Rule 3 Violation: Rejecting further analysis for application {self.id} "
+                    "without human override."
+                ),
+                suggested_action="A HumanReviewCompleted with override=True is required.",
+            )
+        if self.state not in (LoanState.AWAITING_ANALYSIS, LoanState.ANALYSIS_COMPLETE):
+            raise DomainRuleError(
+                rule_name="state_machine",
+                message=f"CreditAnalysisCompleted invalid from state {self.state}",
+            )
+
+    def guard_request_compliance_check(self) -> None:
+        if self.state != LoanState.ANALYSIS_COMPLETE:
+            raise DomainRuleError(
+                rule_name="state_machine",
+                message=f"ComplianceCheckRequested invalid from state {self.state}",
+            )
+
+    def guard_record_compliance(self) -> None:
+        if self.state != LoanState.COMPLIANCE_REVIEW:
+            raise DomainRuleError(
+                rule_name="state_machine",
+                message=f"Compliance event invalid from state {self.state}",
+            )
+
+    def guard_generate_decision(self, event_payload: dict[str, Any]) -> None:
+        if self.state != LoanState.PENDING_DECISION:
+            raise DomainRuleError(
+                rule_name="state_machine",
+                message=(
+                    f"DecisionGenerated only allowed from PENDING_DECISION (current: {self.state})"
+                ),
+            )
+        if not event_payload.get("contributing_agent_sessions"):
+            raise DomainRuleError(
+                rule_name="causal_chain",
+                message="DecisionGenerated must have contributing_agent_sessions",
+            )
+
+    def guard_human_review(self, override: bool, override_reason: str | None) -> None:
+        valid_states = {
+            LoanState.APPROVED_PENDING_HUMAN,
+            LoanState.DECLINED_PENDING_HUMAN,
+            LoanState.REFERRED,
+        }
+        if self.state not in valid_states:
+            raise DomainRuleError(
+                rule_name="state_machine",
+                message=f"HumanReviewCompleted invalid from state {self.state}",
+            )
+        if override and not override_reason:
+            raise DomainRuleError(
+                rule_name="human_review",
+                message="override_reason is required when override=True",
+                suggested_action="Provide a reason for the override.",
+            )
+
+    def guard_finalize_approval(self, is_compliance_passed: bool) -> None:
+        if not is_compliance_passed:
+            raise DomainRuleError(
+                rule_name="compliance_dependency",
+                message=(
+                    f"Rule 5 Violation: ApplicationApproved blocked for {self.id}; "
+                    "ComplianceRecord stream is not PASSED"
+                ),
+                suggested_action="Ensure all ComplianceRulePassed events are recorded first.",
+            )
 
     def validate_causal_chain(self, sessions: list["AgentSessionAggregate"]) -> None:
         """Rule 6: verify every contributing session actually processed this loan.
@@ -239,18 +245,7 @@ class LoanApplicationAggregate(BaseAggregate[LoanState]):
 
 
 class AgentSessionAggregate(BaseAggregate[str]):
-    """Aggregate for an AI agent's session.
-
-    Gas Town rule: AgentContextLoaded MUST be the first event.
-    No analysis or decision event is allowed before it.
-    """
-
-    @classmethod
-    async def load(cls, id: str, store: "EventStore") -> "AgentSessionAggregate":
-        events = await store.load_stream(id)
-        agg = cls(id)
-        agg.load_from_history(events)
-        return agg
+    """Aggregate for an AI agent's session."""
 
     def __init__(self, session_id: str):
         super().__init__(session_id)
@@ -260,56 +255,68 @@ class AgentSessionAggregate(BaseAggregate[str]):
         self.model_version: str | None = None
         self.contributed_apps: set[str] = set()
 
-    def _apply_to_state(self, event: BaseEvent | StoredEvent) -> None:
-        e_type = event.event_type
+    # ------------------------------------------------------------------ dispatch
 
-        # Rule 1 (Gas Town): enforce context-first loading
-        if e_type != "AgentContextLoaded" and not self.context_loaded:
+    def _apply_agent_context_loaded(self, event: BaseEvent | StoredEvent) -> None:
+        self.context_loaded = True
+        self.is_active = True
+        self.agent_id = str(event.payload.get("agent_id", "unknown"))
+        self.model_version = str(event.payload.get("model_version", "unknown"))
+
+    def _apply_credit_analysis_completed(self, event: BaseEvent | StoredEvent) -> None:
+        app_id = event.payload.get("application_id")
+        if app_id:
+            self.contributed_apps.add(str(app_id))
+
+    def _apply_fraud_screening_completed(self, event: BaseEvent | StoredEvent) -> None:
+        app_id = event.payload.get("application_id")
+        if app_id:
+            self.contributed_apps.add(str(app_id))
+
+    def _apply_decision_generated(self, event: BaseEvent | StoredEvent) -> None:
+        app_id = event.payload.get("application_id")
+        if app_id:
+            self.contributed_apps.add(str(app_id))
+
+    def _apply_session_terminated(self, _event: BaseEvent | StoredEvent) -> None:
+        self.is_active = False
+
+    # ------------------------------------------------------------------ guards
+
+    def guard_start_session(self) -> None:
+        if self.version != -1:
             raise DomainRuleError(
                 rule_name="gas_town",
-                message=f"Cannot apply {e_type} before AgentContextLoaded",
-                suggested_action="Start the session with AgentContextLoaded first.",
+                message="AgentContextLoaded must be the first event in the session stream",
+                suggested_action="Do not replay AgentContextLoaded after session has started.",
             )
 
-        if e_type == "AgentContextLoaded":
-            # Must be the very first event (version == -1 means no events yet)
-            if self.version != -1:
-                raise DomainRuleError(
-                    rule_name="gas_town",
-                    message="AgentContextLoaded must be the first event in the session stream",
-                    suggested_action="Do not replay AgentContextLoaded after session has started.",
-                )
-            self.context_loaded = True
-            self.is_active = True
-            self.agent_id = str(event.payload.get("agent_id", "unknown"))
-            self.model_version = str(event.payload.get("model_version", "unknown"))
+    def guard_context_loaded(self) -> None:
+        """Guard: raises if AgentContextLoaded has not yet been replayed."""
+        if not self.context_loaded:
+            raise DomainRuleError(
+                rule_name="gas_town",
+                message=f"Session {self.id} has no loaded context — AgentContextLoaded required",
+                suggested_action="Ensure AgentContextLoaded is the first event on this session.",
+            )
 
-        elif e_type == "CreditAnalysisCompleted":
-            app_id = event.payload.get("application_id")
-            if app_id:
-                self.contributed_apps.add(str(app_id))
-
-        elif e_type == "FraudScreeningCompleted":
-            # v1 handler — track contributed application
-            app_id = event.payload.get("application_id")
-            if app_id:
-                self.contributed_apps.add(str(app_id))
-
-        elif e_type == "DecisionGenerated":
-            app_id = event.payload.get("application_id")
-            if app_id:
-                self.contributed_apps.add(str(app_id))
-
-        elif e_type == "SessionTerminated":
-            self.is_active = False
+    def guard_model_version(self, declared_model_version: str) -> None:
+        """Raises if declared model version differs from one locked at context load."""
+        self.guard_context_loaded()
+        if self.model_version != declared_model_version:
+            raise DomainRuleError(
+                rule_name="model_version_locking",
+                message=(
+                    f"Model version mismatch on session {self.id}: "
+                    f"context locked to '{self.model_version}', "
+                    f"command declared '{declared_model_version}'"
+                ),
+                suggested_action="Start a new session with the correct model version.",
+            )
 
 
 class ComplianceRecordAggregate(BaseAggregate[str]):
-    """Aggregate for a loan's compliance record.
-
-    Lives on stream: compliance-{application_id}
-    Tracks per-rule results and exposes is_passed for the LoanApplication approval gate.
-    """
+    """Aggregate for a loan's compliance record."""
 
     def __init__(self, application_id: str):
         super().__init__(application_id)
@@ -318,21 +325,20 @@ class ComplianceRecordAggregate(BaseAggregate[str]):
         self.is_passed: bool = False
         self.check_requested: bool = False
 
-    def _apply_to_state(self, event: BaseEvent | StoredEvent) -> None:
-        e_type = event.event_type
+    def _apply_compliance_check_requested(self, _event: BaseEvent | StoredEvent) -> None:
+        self.check_requested = True
 
-        if e_type == "ComplianceCheckRequested":
-            self.check_requested = True
+    def _apply_compliance_rule_passed(self, _event: BaseEvent | StoredEvent) -> None:
+        rule_id = str(_event.payload.get("rule_id", "default"))
+        self.results[rule_id] = "PASSED"
+        self._update_is_passed()
 
-        elif e_type == "ComplianceRulePassed":
-            rule_id = str(event.payload.get("rule_id", "default"))
-            self.results[rule_id] = "PASSED"
+    def _apply_compliance_rule_failed(self, _event: BaseEvent | StoredEvent) -> None:
+        rule_id = str(_event.payload.get("rule_id", "default"))
+        self.results[rule_id] = "FAILED"
+        self._update_is_passed()
 
-        elif e_type == "ComplianceRuleFailed":
-            rule_id = str(event.payload.get("rule_id", "default"))
-            self.results[rule_id] = "FAILED"
-
-        # is_passed = all recorded rules passed AND at least one rule exists
+    def _update_is_passed(self) -> None:
         self.is_passed = bool(self.results) and all(v == "PASSED" for v in self.results.values())
 
 
@@ -348,7 +354,6 @@ class AuditLedgerAggregate(BaseAggregate[str]):
         self.last_integrity_hash: str | None = None
         self.check_count: int = 0
 
-    def _apply_to_state(self, event: BaseEvent | StoredEvent) -> None:
-        if event.event_type == "AuditIntegrityCheckRun":
-            self.last_integrity_hash = str(event.payload.get("integrity_hash", ""))
-            self.check_count += 1
+    def _apply_audit_integrity_check_run(self, event: BaseEvent | StoredEvent) -> None:
+        self.last_integrity_hash = str(event.payload.get("integrity_hash", ""))
+        self.check_count += 1
