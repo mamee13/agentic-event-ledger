@@ -66,7 +66,11 @@ class OptimisticConcurrencyError(AgenticLedgerError):
         )
 
 
-class DomainRuleError(AgenticLedgerError):
+class DomainError(AgenticLedgerError):
+    """Base exception for all domain-related errors."""
+
+
+class DomainRuleError(DomainError):
     """Raised when a business rule is violated in an aggregate."""
 
     def __init__(self, rule_name: str, message: str, suggested_action: str | None = None):

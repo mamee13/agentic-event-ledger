@@ -10,9 +10,6 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
-# Re-export DomainRuleError as DomainError so existing tests keep working
-DomainError = DomainRuleError
-
 
 class BaseAggregate(ABC, Generic[T]):
     """Base class for all domain aggregates."""

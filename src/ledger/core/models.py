@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -8,7 +8,6 @@ from pydantic import BaseModel, ConfigDict, Field
 class BaseEvent(BaseModel):
     """Base class for all domain events."""
 
-    event_id: UUID = Field(default_factory=uuid4)
     event_type: str
     event_version: int = 1
     payload: dict[str, Any]
@@ -18,6 +17,7 @@ class BaseEvent(BaseModel):
 class StoredEvent(BaseEvent):
     """Event as stored in and retrieved from the database."""
 
+    event_id: UUID
     stream_id: str
     stream_position: int
     global_position: int
