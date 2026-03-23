@@ -25,6 +25,7 @@ from ledger.infrastructure.store import EventStore
 from ledger.mcp import server as mcp_server
 from ledger.mcp.server import (
     generate_decision,
+    generate_regulatory_package_tool,
     record_compliance_check,
     record_credit_analysis,
     record_human_review,
@@ -279,3 +280,82 @@ async def test_validation_errors_are_structured() -> None:
         "suggested_action",
     ):
         assert field in err, f"Missing field: {field}"
+
+
+@pytest.mark.asyncio
+async def test_regulatory_package_requires_compliance_role() -> None:
+    result = await generate_regulatory_package_tool(
+        application_id=str(uuid4()),
+        examination_date="2026-03-21T00:00:00",
+        compliance_role="ANALYST",
+    )
+    assert result["ok"] is False
+    assert result["error"]["error_type"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_regulatory_package_rejects_bad_date() -> None:
+    result = await generate_regulatory_package_tool(
+        application_id=str(uuid4()),
+        examination_date="not-a-date",
+        compliance_role="COMPLIANCE_OFFICER",
+    )
+    assert result["ok"] is False
+    assert result["error"]["error_type"] == "VALIDATION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_regulatory_package_rejects_missing_application() -> None:
+    result = await generate_regulatory_package_tool(
+        application_id="does-not-exist",
+        examination_date="2026-03-21T00:00:00",
+        compliance_role="COMPLIANCE_OFFICER",
+    )
+    assert result["ok"] is False
+    assert result["error"]["error_type"] == "RESOURCE_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_regulatory_package_full() -> None:
+    """Generate a package for a submitted application and verify structure."""
+    from datetime import UTC, datetime
+
+    app_id = str(uuid4())
+    agent_id = f"agent-{uuid4()}"
+    session_id = str(uuid4())
+
+    # Minimal lifecycle: session + application only
+    await start_agent_session(agent_id=agent_id, session_id=session_id, model_version="v2.0")
+    await submit_application(
+        application_id=app_id,
+        applicant_id="user-reg-001",
+        requested_amount_usd=10000.0,
+    )
+
+    result = await generate_regulatory_package_tool(
+        application_id=app_id,
+        examination_date=datetime.now(UTC).isoformat(),
+        compliance_role="COMPLIANCE_OFFICER",
+    )
+    assert result["ok"] is True, result
+
+    pkg = result["package"]
+    # Required top-level keys per spec
+    for key in (
+        "schema_version",
+        "generated_at",
+        "application_id",
+        "examination_date",
+        "package_checksum",
+        "event_stream",
+        "projection_states",
+        "integrity_verification",
+        "narrative",
+        "agent_attribution",
+    ):
+        assert key in pkg, f"Missing key: {key}"
+
+    assert pkg["application_id"] == app_id
+    assert len(pkg["event_stream"]) >= 1
+    assert pkg["package_checksum"] != ""
+    assert pkg["integrity_verification"]["is_valid"] is True

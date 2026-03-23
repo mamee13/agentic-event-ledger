@@ -96,5 +96,14 @@ The MCP server listens on port **8000**. Connect any MCP-compatible client to it
 | `ledger://agents/{id}/performance` | AgentPerformance projection |
 | `ledger://ledger/health` | Projection lag for all projections |
 
+## Demonstration
+
+A built-in script exists to demonstrate the "Show me the complete decision history" requirement (TRP1 phase 6). It will extract the entire cryptographic audit trail and lifecycle narrative.
+
+```bash
+uv run python scripts/show_history.py <application_id>
+```
+*(If you need a sample application to run this against, you can execute `uv run python scripts/generate_demo_data.py` first to generate a full loan application lifecycle.)*
+
 ## Architecture Overview
-See [DESIGN.md](DESIGN.md) for details on the event store, aggregates, and projections.
+See [DESIGN.md](DESIGN.md) for details on the event store, aggregates, and projections. You can also view [DOMAIN_NOTES.md](DOMAIN_NOTES.md) for domain reconnaissance decisions.

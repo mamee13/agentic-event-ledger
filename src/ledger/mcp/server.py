@@ -12,8 +12,10 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -22,6 +24,7 @@ from mcp.server.fastmcp import FastMCP
 from ledger.application.service import LedgerService
 from ledger.core.agent_context import reconstruct_agent_context
 from ledger.core.models import BaseEvent
+from ledger.core.regulatory_package import generate_regulatory_package
 from ledger.infrastructure.db.connection import get_pool
 from ledger.infrastructure.projections.agent_performance import AgentPerformanceProjection
 from ledger.infrastructure.projections.application_summary import ApplicationSummaryProjection
@@ -50,6 +53,18 @@ _agent_perf: AgentPerformanceProjection | None = None
 _compliance: ComplianceAuditViewProjection | None = None
 _daemon: ProjectionDaemon | None = None
 _daemon_task: asyncio.Task[None] | None = None
+
+
+def setup_logging(level: str = "INFO") -> None:
+    """Configures centralized logging for the MCP server and background tasks."""
+    import sys
+
+    logging.basicConfig(
+        level=getattr(logging, level.upper()),
+        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        stream=sys.stderr,
+        force=True,
+    )
 
 
 def _get_pool() -> asyncpg.Pool:
@@ -88,6 +103,8 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
     global _daemon, _daemon_task
 
     _pool = await get_pool()
+    setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
+
     _store = EventStore(_pool)
     _service = LedgerService(_store)
     _app_summary = ApplicationSummaryProjection(_pool)
@@ -143,6 +160,115 @@ _REGULATION_SETS: dict[str, set[str]] = {
 _DEFAULT_REG_SET = "EU-AI-ACT-2025"
 
 # ---------------------------------------------------------------------------
+# Tool -1 — register_applicant
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def register_applicant(
+    applicant_id: str,
+    name: str,
+    industry: str,
+    jurisdiction: str,
+    legal_type: str = "Individual",
+    risk_segment: str = "LOW",
+) -> dict[str, Any]:
+    """Register or update an applicant's profile in the registry.
+
+    :param applicant_id: Unique ID for the company or person (e.g. 'entity-99').
+    :param name: Legal name of the applicant.
+    :param industry: Business sector (e.g. 'Finance', 'Tech').
+    :param jurisdiction: Country or state code (ISO).
+    :param legal_type: Type of entity (LLC, Corporation, Individual).
+    :param risk_segment: Initial risk tier (LOW, MEDIUM, HIGH).
+    """
+    logger.info(" TOOL: register_applicant (id=%s, name=%s)", applicant_id, name)
+    if not applicant_id.strip():
+        return _err(validation_error("applicant_id must not be empty."))
+    if risk_segment not in {"LOW", "MEDIUM", "HIGH"}:
+        return _err(validation_error("risk_segment must be LOW, MEDIUM, or HIGH."))
+
+    try:
+        await _get_pool().execute(
+            """
+            INSERT INTO applicant_registry.companies 
+            (company_id, name, industry, naics, jurisdiction, legal_type, founded_year,
+             employee_count, ein, address_city, address_state, relationship_start,
+             account_manager, risk_segment, trajectory, submission_channel, ip_region)
+            VALUES ($1, $2, $3, '000000', $4, $5, 2020, 1, $6, 'Unknown', 'Unknown',
+                    NOW(), 'SYSTEM', $7, 'STEADY', 'WEB', 'US')
+            ON CONFLICT (company_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                industry = EXCLUDED.industry,
+                risk_segment = EXCLUDED.risk_segment
+            """,
+            applicant_id,
+            name,
+            industry,
+            jurisdiction,
+            legal_type,
+            f"EIN-{applicant_id}",
+            risk_segment,
+        )
+    except Exception as exc:
+        return _err(from_exception(exc, f"registry-{applicant_id}"))
+
+    return _ok(applicant_id=applicant_id, status="REGISTERED")
+
+
+# ---------------------------------------------------------------------------
+# Tool 0 — record_document_upload
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def record_document_upload(
+    application_id: str,
+    document_id: str,
+    file_path: str,
+    document_type: str = "LOAN_APPLICATION_PDF",
+) -> dict[str, Any]:
+    """Record a document upload (e.g., a PDF) for an application.
+    This enables background agents to process the document.
+    """
+    logger.info(" TOOL: record_document_upload (app=%s, file=%s)", application_id, file_path)
+    loan_stream = f"loan-{application_id}"
+
+    if not application_id.strip():
+        return _err(validation_error("application_id must not be empty."))
+    if not document_id.strip():
+        return _err(validation_error("document_id must not be empty."))
+    if not file_path.strip():
+        return _err(validation_error("file_path must not be empty."))
+
+    # Verify loan exists
+    if await _get_store().stream_version(loan_stream) == -1:
+        return _err(not_found_error(f"Loan application {loan_stream}"))
+
+    try:
+        event = BaseEvent(
+            event_type="DocumentUploaded",
+            payload={
+                "application_id": application_id,
+                "document_id": document_id,
+                "file_path": file_path,
+                "document_type": document_type,
+                "uploaded_at": datetime.now().isoformat(),
+            },
+        )
+        l_ver = await _get_store().stream_version(loan_stream)
+        await _get_store().append(loan_stream, [event], expected_version=l_ver)
+    except Exception as exc:
+        return _err(from_exception(exc, loan_stream))
+
+    return _ok(
+        application_id=application_id,
+        document_id=document_id,
+        file_path=file_path,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool 1 — submit_application
 # ---------------------------------------------------------------------------
 
@@ -153,7 +279,13 @@ async def submit_application(
     applicant_id: str,
     requested_amount_usd: float,
 ) -> dict[str, Any]:
-    """Submit a new loan application. Validates schema and rejects duplicates."""
+    """Submit a new loan application. Validates schema and rejects duplicates.
+
+    :param application_id: Unique loan ID (e.g. 'loan-2026-001').
+    :param applicant_id: ID of a registered applicant.
+    :param requested_amount_usd: Total loan amount requested.
+    """
+    logger.info(" TOOL: submit_application (app=%s, applicant=%s)", application_id, applicant_id)
     if not application_id.strip():
         return _err(validation_error("application_id must not be empty."))
     if not applicant_id.strip():
@@ -196,6 +328,7 @@ async def start_agent_session(
     context_token_count: int = 1024,
 ) -> dict[str, Any]:
     """Start a new agent session. Writes AgentContextLoaded as the first event."""
+    logger.info(" TOOL: start_agent_session (agent=%s, session=%s)", agent_id, session_id)
     if not agent_id.strip():
         return _err(validation_error("agent_id must not be empty."))
     if not session_id.strip():
@@ -253,6 +386,7 @@ async def record_credit_analysis(
     Requires an active AgentSession with AgentContextLoaded as first event.
     Enforces optimistic concurrency on the loan stream.
     """
+    logger.info(" TOOL: record_credit_analysis (app=%s, risk=%s)", application_id, risk_tier)
     loan_stream = f"loan-{application_id}"
     session_stream = f"agent-{agent_id}-{session_id}"
 
@@ -318,6 +452,7 @@ async def record_fraud_screening(
     Requires an active AgentSession with context loaded.
     fraud_score must be in 0.0–1.0.
     """
+    logger.info(" TOOL: record_fraud_screening (app=%s, score=%s)", application_id, fraud_score)
     loan_stream = f"loan-{application_id}"
     session_stream = f"agent-{agent_id}-{session_id}"
 
@@ -387,6 +522,12 @@ async def record_compliance_check(
     rule_id must exist in the active regulation_set_version.
     status must be PASSED or FAILED.
     """
+    logger.info(
+        " TOOL: record_compliance_check (app=%s, rule=%s, status=%s)",
+        application_id,
+        rule_id,
+        status,
+    )
     loan_stream = f"loan-{application_id}"
 
     if status not in {"PASSED", "FAILED"}:
@@ -446,6 +587,7 @@ async def generate_decision(
 
     Enforces confidence floor (< 0.6 → REFER) and causal chain validation.
     """
+    logger.info(" TOOL: generate_decision (app=%s, rec=%s)", application_id, recommendation)
     loan_stream = f"loan-{application_id}"
 
     if recommendation not in {"APPROVE", "DECLINE", "REFER"}:
@@ -507,6 +649,12 @@ async def record_human_review(
 
     reviewer_id is required. If override=True, override_reason must be provided.
     """
+    logger.info(
+        " TOOL: record_human_review (app=%s, reviewer=%s, decision=%s)",
+        application_id,
+        reviewer_id,
+        final_decision,
+    )
     loan_stream = f"loan-{application_id}"
 
     if not reviewer_id.strip():
@@ -589,6 +737,77 @@ async def run_integrity_check(
         integrity_hash=new_hash,
         previous_hash=previous_hash,
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool 9 — generate_regulatory_package
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def generate_regulatory_package_tool(
+    application_id: str,
+    examination_date: str,
+    compliance_role: str,
+) -> dict[str, Any]:
+    """Generate a self-contained regulatory examination package for a loan application.
+
+    Produces a JSON artifact containing:
+      - Full ordered event stream as of examination_date
+      - Projection states (application summary + compliance audit view) at that date
+      - Cryptographic hash chain integrity verification result
+      - Human-readable narrative (one sentence per significant event)
+      - Agent attribution: model versions, confidence scores, input hashes
+
+    The package is independently verifiable — a regulator can validate it
+    without access to the live system.
+
+    Requires compliance_role = 'COMPLIANCE_OFFICER'.
+
+    :param application_id: Loan application ID (without 'loan-' prefix).
+    :param examination_date: ISO-8601 datetime string (e.g. '2026-03-21T00:00:00').
+    :param compliance_role: Must be 'COMPLIANCE_OFFICER'.
+    """
+    logger.info(
+        " TOOL: generate_regulatory_package (app=%s, as_of=%s)", application_id, examination_date
+    )
+
+    if compliance_role != "COMPLIANCE_OFFICER":
+        return _err(
+            validation_error(
+                "Only COMPLIANCE_OFFICER role may generate regulatory packages.",
+                suggested_action="Authenticate with the COMPLIANCE_OFFICER role.",
+            )
+        )
+
+    if not application_id.strip():
+        return _err(validation_error("application_id must not be empty."))
+
+    try:
+        as_of = datetime.fromisoformat(examination_date)
+    except ValueError:
+        return _err(
+            validation_error(
+                f"examination_date '{examination_date}' is not a valid ISO-8601 datetime.",
+                suggested_action="Use format: YYYY-MM-DDTHH:MM:SS",
+            )
+        )
+
+    loan_stream = f"loan-{application_id}"
+    if await _get_store().stream_version(loan_stream) == -1:
+        return _err(not_found_error(f"Loan application {loan_stream}"))
+
+    try:
+        package = await generate_regulatory_package(
+            application_id=application_id,
+            examination_date=as_of,
+            store=_get_store(),
+            compliance_projection=_get_compliance(),
+        )
+    except Exception as exc:
+        return _err(from_exception(exc, loan_stream))
+
+    return _ok(package=package)
 
 
 # ---------------------------------------------------------------------------

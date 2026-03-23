@@ -233,3 +233,53 @@ class SessionTerminated(BaseEvent):
         reason: str | None = None
 
     payload: dict[str, Any]
+
+
+class FraudScreeningRequested(BaseEvent):
+    """Fraud screening has been requested for a loan application."""
+
+    event_type: str = "FraudScreeningRequested"
+
+    class Payload(BaseModel):
+        application_id: str
+
+    payload: dict[str, Any]
+
+
+class ApplicationWithdrawn(BaseEvent):
+    """A loan application has been withdrawn by the applicant."""
+
+    event_type: str = "ApplicationWithdrawn"
+
+    class Payload(BaseModel):
+        application_id: str
+        reason: str | None = None
+        withdrawn_at: str
+
+    payload: dict[str, Any]
+
+
+class ComplianceClearanceIssued(BaseEvent):
+    """A final compliance clearance has been issued for the entire application."""
+
+    event_type: str = "ComplianceClearanceIssued"
+
+    class Payload(BaseModel):
+        application_id: str
+        cleared_by: str
+        regulation_set: str
+
+    payload: dict[str, Any]
+
+
+class AuditStreamInitialised(BaseEvent):
+    """An audit stream has been initialised for an entity."""
+
+    event_type: str = "AuditStreamInitialised"
+
+    class Payload(BaseModel):
+        entity_id: str
+        entity_type: str
+        initialised_at: str
+
+    payload: dict[str, Any]

@@ -542,3 +542,38 @@ async def test_narr05_human_override() -> None:
 
     finally:
         await pool.close()
+
+
+# ── NARR-06: Narrative string generation ────────────────────────────────────────
+
+
+def test_narr06_narrative_sentences() -> None:
+    """Verify the string generator for the newly added event models."""
+    from ledger.core.regulatory_package import _narrative
+
+    cases = [
+        (
+            "FraudScreeningRequested",
+            {"application_id": "app-1"},
+            "Fraud screening requested for application app-1.",
+        ),
+        (
+            "ApplicationWithdrawn",
+            {"application_id": "app-1", "reason": "found better rate"},
+            "Application app-1 was withdrawn by the applicant (reason: found better rate).",
+        ),
+        (
+            "ComplianceClearanceIssued",
+            {"application_id": "app-1", "cleared_by": "agent-1", "regulation_set": "EU"},
+            "Final compliance clearance issued for app-1 by agent-1 under EU.",
+        ),
+        (
+            "AuditStreamInitialised",
+            {"application_id": "app-1", "entity_type": "loan"},
+            "Audit stream initialised for loan app-1.",
+        ),
+    ]
+
+    for event_type, payload, expected in cases:
+        result = _narrative(event_type, payload)
+        assert result == expected, f"Expected '{expected}', got '{result}'"

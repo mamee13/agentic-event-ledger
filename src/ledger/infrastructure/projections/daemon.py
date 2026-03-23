@@ -36,6 +36,8 @@ class ProjectionDaemon:
                 processed_count = await self._process_batch()
                 if processed_count == 0:
                     await asyncio.sleep(poll_interval_ms / 1000.0)
+                else:
+                    logger.debug(" Daemon: Processed %d events in batch", processed_count)
             except Exception:
                 logger.exception("Error in ProjectionDaemon loop")
                 await asyncio.sleep(poll_interval_ms / 1000.0)
@@ -58,6 +60,12 @@ class ProjectionDaemon:
                 from_global_position=lowest_pos, batch_size=self._batch_size
             ):
                 count += 1
+                logger.info(
+                    " Daemon: Processing [%d] %s (stream: %s)",
+                    event.global_position,
+                    event.event_type,
+                    event.stream_id,
+                )
                 for projection in self._projections:
                     # Advance checkpoint for non-subscribed events so we don't re-scan them.
                     # Must happen before the subscription check so the position is always
@@ -76,6 +84,11 @@ class ProjectionDaemon:
                         try:
                             await projection.handle_event(
                                 event, conn=conns[projection.projection_name]
+                            )
+                            logger.debug(
+                                " Daemon: %s updated to pos %d",
+                                projection.projection_name,
+                                event.global_position,
                             )
                             success = True
                             break

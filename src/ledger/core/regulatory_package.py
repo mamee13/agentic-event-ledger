@@ -73,6 +73,18 @@ def _narrative(event_type: str, payload: dict[str, Any]) -> str:
             return f"Application {app} approved for ${amt}."
         case "ApplicationDeclined":
             return f"Application {app} declined."
+        case "FraudScreeningRequested":
+            return f"Fraud screening requested for application {app}."
+        case "ApplicationWithdrawn":
+            reason = f" (reason: {payload.get('reason')})" if payload.get("reason") else ""
+            return f"Application {app} was withdrawn by the applicant{reason}."
+        case "ComplianceClearanceIssued":
+            by = payload.get("cleared_by", "?")
+            reg = payload.get("regulation_set", "?")
+            return f"Final compliance clearance issued for {app} by {by} under {reg}."
+        case "AuditStreamInitialised":
+            typ = payload.get("entity_type", "?")
+            return f"Audit stream initialised for {typ} {app}."
         case "AuditIntegrityCheckRun":
             n = payload.get("events_hashed", "?")
             return f"Integrity check run: {n} events hashed."

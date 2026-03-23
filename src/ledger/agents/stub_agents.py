@@ -653,9 +653,11 @@ REGULATIONS: dict[str, Any] = {
         "name": "Bank Secrecy Act (BSA) Check",
         "version": "2026-Q1-v1",
         "is_hard_block": False,
-        "check": lambda co: not any(
-            f.get("flag_type") == "AML_WATCH" and f.get("is_active")
-            for f in co.get("compliance_flags", [])
+        "check": lambda co: (
+            not any(
+                f.get("flag_type") == "AML_WATCH" and f.get("is_active")
+                for f in co.get("compliance_flags", [])
+            )
         ),
         "failure_reason": "Active AML Watch flag present. Remediation required.",
         "remediation": "Provide enhanced due diligence documentation within 10 business days.",
@@ -664,9 +666,11 @@ REGULATIONS: dict[str, Any] = {
         "name": "OFAC Sanctions Screening",
         "version": "2026-Q1-v1",
         "is_hard_block": True,
-        "check": lambda co: not any(
-            f.get("flag_type") == "SANCTIONS_REVIEW" and f.get("is_active")
-            for f in co.get("compliance_flags", [])
+        "check": lambda co: (
+            not any(
+                f.get("flag_type") == "SANCTIONS_REVIEW" and f.get("is_active")
+                for f in co.get("compliance_flags", [])
+            )
         ),
         "failure_reason": "Active OFAC Sanctions Review. Application blocked.",
         "remediation": None,
@@ -683,9 +687,11 @@ REGULATIONS: dict[str, Any] = {
         "name": "Legal Entity Type Eligibility",
         "version": "2026-Q1-v1",
         "is_hard_block": False,
-        "check": lambda co: not (
-            co.get("legal_type") == "Sole Proprietor"
-            and (co.get("requested_amount_usd", 0) or 0) > 250_000
+        "check": lambda co: (
+            not (
+                co.get("legal_type") == "Sole Proprietor"
+                and (co.get("requested_amount_usd", 0) or 0) > 250_000
+            )
         ),
         "failure_reason": "Sole Proprietor loans >$250K require additional documentation.",
         "remediation": "Submit SBA Form 912 and personal financial statement.",
@@ -694,8 +700,9 @@ REGULATIONS: dict[str, Any] = {
         "name": "Minimum Operating History",
         "version": "2026-Q1-v1",
         "is_hard_block": True,
-        "check": lambda co: (datetime.now().year - (co.get("founded_year") or datetime.now().year))
-        >= 2,
+        "check": lambda co: (
+            (datetime.now().year - (co.get("founded_year") or datetime.now().year)) >= 2
+        ),
         "failure_reason": "Business must have at least 2 years of operating history.",
         "remediation": None,
     },

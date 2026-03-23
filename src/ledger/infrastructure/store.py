@@ -1,4 +1,5 @@
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -8,6 +9,8 @@ from ledger.core.errors import OptimisticConcurrencyError
 from ledger.core.models import BaseEvent, StoredEvent, StreamMetadata
 from ledger.core.upcasting import UpcasterRegistry
 from ledger.infrastructure.upcasters import registry as _default_registry
+
+logger = logging.getLogger(__name__)
 
 
 class EventStore:
@@ -156,6 +159,12 @@ class EventStore:
                             "causation_id": causation_id,
                         }
                     ),
+                )
+                logger.info(
+                    " Store: Appended %s to %s at pos %d",
+                    event.event_type,
+                    stream_id,
+                    new_v,
                 )
 
                 # 3. Write to outbox

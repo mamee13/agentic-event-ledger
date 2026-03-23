@@ -21,11 +21,10 @@ from ledger.core.aggregates import (
     AgentSessionAggregate,
     AuditLedgerAggregate,
     ComplianceRecordAggregate,
-    DomainError,
     LoanApplicationAggregate,
     LoanState,
 )
-from ledger.core.errors import DomainRuleError
+from ledger.core.errors import DomainError, DomainRuleError
 from ledger.core.models import BaseEvent
 
 # ---------------------------------------------------------------------------
@@ -593,11 +592,6 @@ def test_audit_ledger_increments_check_count() -> None:
 # ---------------------------------------------------------------------------
 # DomainError / DomainRuleError compatibility
 # ---------------------------------------------------------------------------
-
-
-def test_domain_error_is_domain_rule_error() -> None:
-    """DomainError alias must be the same class as DomainRuleError."""
-    assert DomainError is DomainRuleError
 
 
 def test_domain_rule_error_has_structured_dict() -> None:

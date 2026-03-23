@@ -144,7 +144,7 @@ Choose **inference** when:
 
 The current design writes `ComplianceRulePassed` / `ComplianceRuleFailed` to the `compliance-{id}` stream only, then emits a synthetic `ComplianceRulePassed` (with `rule_id = "compliance_clearance"`) to the loan stream when all rules pass. This was the right call for avoiding write contention between the `ComplianceAgent` and the loan lifecycle, but the implementation has a subtle problem: the clearance event is a fabricated event that does not correspond to any real domain fact. It exists purely to advance the loan state machine.
 
-With another day I would introduce a dedicated `ComplianceClearanceIssued` event type — already identified in the missing events catalogue — and emit that to the loan stream instead. This makes the intent explicit in the event catalogue, removes the ambiguity of a `ComplianceRulePassed` event with a synthetic `rule_id`, and gives the `LoanApplicationAggregate` a clean, unambiguous trigger for the `COMPLIANCE_REVIEW → PENDING_DECISION` transition. The `ComplianceRecordAggregate` would emit this event as its terminal event, and the service layer would append it to the loan stream as a cross-stream write — the same pattern already used for `ComplianceCheckRequested`.
+With another day I would introduce a dedicated `ComplianceClearanceIssued` event type — already identified in the missing events catalogue — and emit that to the loan stream instead. *(Update: This has now been implemented. `ComplianceClearanceIssued` is emitted explicitly to the loan stream.)* This makes the intent explicit in the event catalogue, removes the ambiguity of a `ComplianceRulePassed` event with a synthetic `rule_id`, and gives the `LoanApplicationAggregate` a clean, unambiguous trigger for the `COMPLIANCE_REVIEW → PENDING_DECISION` transition. The `ComplianceRecordAggregate` would emit this event as its terminal event, and the service layer would append it to the loan stream as a cross-stream write — the same pattern already used for `ComplianceCheckRequested`.
 
 The broader lesson: when a state machine transition requires a signal from another aggregate, model that signal as a named domain event rather than reusing an existing event type with a special payload value. The latter works but leaks implementation detail into the event catalogue.
 
@@ -175,12 +175,14 @@ The broader lesson: when a state machine transition requires a signal from anoth
 
 The challenge catalogue is intentionally incomplete. The following events are missing and should be added:
 
-| Missing Event | Aggregate | Reason |
+| Missing Event | Aggregate | Status / Reason |
 |---|---|---|
-| `FraudScreeningRequested` | `LoanApplication` | Symmetry with `CreditAnalysisRequested` — the loan stream should record when fraud screening was initiated, not just when it completed |
+| `FraudScreeningRequested` | `LoanApplication` | **[Implemented]** Symmetry with `CreditAnalysisRequested` — the loan stream should record when fraud screening was initiated, not just when it completed |
 | `AgentSessionClosed` | `AgentSession` | A session needs a terminal event to mark it as complete; without it, `reconstruct_agent_context` cannot distinguish an active session from an abandoned one |
-| `ComplianceClearanceIssued` | `ComplianceRecord` | The aggregate needs a terminal event confirming all required checks passed; `ComplianceRulePassed` events alone do not constitute a clearance |
-| `ApplicationWithdrawn` | `LoanApplication` | Applicants can withdraw; the state machine needs this transition to reach a terminal state without approval or decline |
+| `ComplianceClearanceIssued` | `ComplianceRecord` | **[Implemented]** The aggregate needs a terminal event confirming all required checks passed; `ComplianceRulePassed` events alone do not constitute a clearance |
+| `ApplicationWithdrawn` | `LoanApplication` | **[Implemented]** Applicants can withdraw; the state machine needs this transition to reach a terminal state without approval or decline |
 | `HumanReviewOverride` | `LoanApplication` | The model version locking rule (business rule 3) references this event as the only way to supersede a completed credit analysis; it is referenced but not defined in the catalogue |
 | `DecisionOrchestratorSessionStarted` | `AgentSession` | The `DecisionOrchestrator` is an agent and must follow the Gas Town pattern — it needs an `AgentContextLoaded` equivalent to start its session |
-| `AuditStreamInitialised` | `AuditLedger` | The audit stream needs an identity event recording what entity it covers and when monitoring began |
+| `AuditStreamInitialised` | `AuditLedger` | **[Implemented]** The audit stream needs an identity event recording what entity it covers and when monitoring began |
+
+*(Note: `FraudScreeningRequested`, `ApplicationWithdrawn`, `ComplianceClearanceIssued`, and `AuditStreamInitialised` have now been implemented in the core models.)*
