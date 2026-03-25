@@ -12,7 +12,7 @@ Rules:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -30,16 +30,37 @@ _PARTIAL_EVENT_TYPES = {
 
 @dataclass
 class AgentContextSummary:
+    """Typed context object returned by reconstruct_agent_context().
+
+    Rubric-required fields:
+        context_text: Token-efficient prose summary of the session history.
+            Older events are condensed to one line each; the last 3 are verbatim.
+        last_event_position: stream_position of the most recent event in the session.
+        pending_work: List of in-flight event types that have no matching completion
+            event (empty list when the session is cleanly terminated).
+        session_health_status: 'NEEDS_RECONCILIATION' when the last event is partial,
+            'OK' otherwise.
+
+    Additional fields retained for backwards compatibility with existing callers:
+        session_id, agent_id, model_version, is_active, last_completed_action,
+        needs_reconciliation, summary, recent_events, total_events.
+    """
+
     session_id: str
     agent_id: str | None
     model_version: str | None
     is_active: bool
     last_completed_action: str | None
-    pending_work: str | None
+    # pending_work as a list (rubric: pending_work[])
+    pending_work: list[str]
     needs_reconciliation: bool
     summary: list[str]  # one line per older event
     recent_events: list[dict[str, Any]]  # last 3 verbatim payloads
     total_events: int
+    # Rubric-required field names
+    context_text: str = field(default="")
+    last_event_position: int = field(default=0)
+    session_health_status: str = field(default="OK")
 
 
 def _summarise(event_type: str, payload: dict[str, Any]) -> str:
@@ -64,11 +85,14 @@ async def reconstruct_agent_context(
             model_version=None,
             is_active=False,
             last_completed_action=None,
-            pending_work=None,
+            pending_work=[],
             needs_reconciliation=False,
             summary=[],
             recent_events=[],
             total_events=0,
+            context_text="",
+            last_event_position=0,
+            session_health_status="OK",
         )
 
     # Extract agent metadata from the first event (AgentContextLoaded)
@@ -112,15 +136,24 @@ async def reconstruct_agent_context(
         for e in tail_events
     ]
 
+    # Rubric-required fields
+    context_text = "\n".join(summary) if summary else ""
+    last_event_position = events[-1].stream_position
+    pending_work_list = [pending] if pending else []
+    session_health_status = "NEEDS_RECONCILIATION" if needs_reconciliation else "OK"
+
     return AgentContextSummary(
         session_id=session_id,
         agent_id=agent_id,
         model_version=model_version,
         is_active=is_active,
         last_completed_action=last_completed,
-        pending_work=pending,
+        pending_work=pending_work_list,
         needs_reconciliation=needs_reconciliation,
         summary=summary,
         recent_events=recent,
         total_events=len(events),
+        context_text=context_text,
+        last_event_position=last_event_position,
+        session_health_status=session_health_status,
     )
