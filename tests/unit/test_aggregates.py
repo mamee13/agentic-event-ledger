@@ -210,7 +210,26 @@ def test_gas_town_happy_path() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_confidence_floor_below_threshold_forces_refer() -> None:
+def test_confidence_floor_below_threshold_rejected() -> None:
+    """Rule 4: DecisionGenerated with confidence < 0.6 and recommendation != REFER is rejected."""
+    loan = _make_loan()
+    _advance_to_pending_decision(loan)
+
+    with pytest.raises(DomainError, match="Rule 4 Violation"):
+        loan.apply(
+            BaseEvent(
+                event_type="DecisionGenerated",
+                payload={
+                    "recommendation": "APPROVE",
+                    "confidence_score": 0.55,
+                    "contributing_agent_sessions": ["sess-1"],
+                },
+            )
+        )
+
+
+def test_confidence_floor_below_threshold_allowed_as_refer() -> None:
+    """Rule 4: confidence < 0.6 is accepted when recommendation is already REFER."""
     loan = _make_loan()
     _advance_to_pending_decision(loan)
 
@@ -218,7 +237,7 @@ def test_confidence_floor_below_threshold_forces_refer() -> None:
         BaseEvent(
             event_type="DecisionGenerated",
             payload={
-                "recommendation": "APPROVE",
+                "recommendation": "REFER",
                 "confidence_score": 0.55,
                 "contributing_agent_sessions": ["sess-1"],
             },

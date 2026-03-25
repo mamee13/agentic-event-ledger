@@ -10,9 +10,29 @@ recomputing each hash. Any mismatch indicates tampering.
 import hashlib
 import json
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from ledger.core.models import BaseEvent, StoredEvent
+
+
+@dataclass
+class IntegrityCheckResult:
+    """Typed result returned by run_integrity_check().
+
+    Attributes:
+        integrity_hash: The newly computed SHA-256 hash appended to the chain.
+        previous_hash: The hash from the previous AuditIntegrityCheckRun (empty string
+            if this is the first check).
+        chain_valid: True if the full chain verified correctly up to this point.
+        tamper_detected: True if any hash mismatch was found during verification,
+            indicating that a stored event payload has been modified after the fact.
+    """
+
+    integrity_hash: str
+    previous_hash: str
+    chain_valid: bool
+    tamper_detected: bool
 
 
 def _hash_payload(payload: dict[str, Any]) -> str:
@@ -89,15 +109,17 @@ def verify_chain(
 async def run_integrity_check(
     audit_stream_id: str,
     store: "EventStore",
-) -> tuple[str, str]:
+) -> IntegrityCheckResult:
     """Appends an AuditIntegrityCheckRun event to the audit stream.
 
     Loads all events on the stream, finds the last AuditIntegrityCheckRun to
     get the previous_hash, hashes all events since that check, then appends
-    the new check run event.
+    the new check run event.  After appending, verifies the full chain and
+    returns a typed result with chain_valid and tamper_detected booleans.
 
     Returns:
-        (new_integrity_hash, previous_hash)
+        IntegrityCheckResult with integrity_hash, previous_hash, chain_valid,
+        and tamper_detected fields.
     """
     from ledger.core.models import BaseEvent
 
@@ -136,7 +158,19 @@ async def run_integrity_check(
     )
     await store.append(audit_stream_id, [check_event], expected_version=expected_version)
 
-    return new_hash, previous_hash
+    # Verify the full chain (including the event we just appended) using raw reads
+    # so hashes are computed over the exact stored bytes.
+    all_events_raw = await store.load_stream_raw(audit_stream_id)
+    all_check_runs = [e for e in all_events_raw if e.event_type == "AuditIntegrityCheckRun"]
+    chain_valid, _ = verify_chain(all_check_runs, all_events_raw)
+    tamper_detected = not chain_valid
+
+    return IntegrityCheckResult(
+        integrity_hash=new_hash,
+        previous_hash=previous_hash,
+        chain_valid=chain_valid,
+        tamper_detected=tamper_detected,
+    )
 
 
 # Avoid circular import — EventStore imports from this module indirectly
