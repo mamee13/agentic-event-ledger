@@ -980,7 +980,14 @@ async def get_application(application_id: str) -> str:
 
 @mcp.resource("ledger://applications/{application_id}/audit-trail")
 async def get_audit_trail(application_id: str) -> str:
-    """Full audit trail from projection (no stream reads)."""
+    """Full audit trail from the projection_audit_trail table (no aggregate stream reads).
+
+    Justified exception: the audit trail is written to a dedicated projection table by the
+    AuditTrailProjection daemon, which fans out every event from every stream associated
+    with the application into a single ordered view. Reading directly from the projection
+    table is correct here — replaying the raw audit-loan-{id} stream would miss events
+    from the loan, agent, and compliance streams that are also part of the audit record.
+    """
     rows = await _get_pool().fetch(
         """
         SELECT event_type, payload, global_position, recorded_at, source_stream_id
@@ -1009,7 +1016,14 @@ async def get_audit_trail(application_id: str) -> str:
 
 @mcp.resource("ledger://agents/{agent_id}/sessions/{session_id}")
 async def get_agent_session(agent_id: str, session_id: str) -> str:
-    """Agent session context from projection (no stream reads)."""
+    """Agent session context from the projection_agent_sessions table (no stream reads).
+
+    Justified exception: agent session streams can be very long (one event per node
+    execution) and are write-heavy during active processing. The AgentSessionViewProjection
+    daemon maintains a pre-computed summary — including context_text, last_event_position,
+    pending_work, and needs_reconciliation — so LLM consumers get a token-efficient view
+    without replaying the full raw stream on every read.
+    """
     stream_id = f"agent-{agent_id}-{session_id}"
     row = await _get_pool().fetchrow(
         "SELECT * FROM projection_agent_sessions WHERE session_id = $1",
