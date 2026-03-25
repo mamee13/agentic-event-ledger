@@ -1,5 +1,6 @@
 """Integration test: cryptographic audit chain write + verify cycle."""
 
+import json
 from uuid import uuid4
 
 import pytest
@@ -28,9 +29,11 @@ async def test_audit_chain_write_and_verify() -> None:
     )
 
     # Run first integrity check
-    h1, prev1 = await run_integrity_check(stream_id, store)
-    assert prev1 == ""
-    assert len(h1) == 64
+    result1 = await run_integrity_check(stream_id, store)
+    assert result1.previous_hash == ""
+    assert len(result1.integrity_hash) == 64
+    assert result1.chain_valid is True
+    assert result1.tamper_detected is False
 
     # Write more events
     v = await store.stream_version(stream_id)
@@ -40,12 +43,14 @@ async def test_audit_chain_write_and_verify() -> None:
         expected_version=v,
     )
 
-    # Run second integrity check — must chain from h1
-    h2, prev2 = await run_integrity_check(stream_id, store)
-    assert prev2 == h1
-    assert h2 != h1
+    # Run second integrity check — must chain from result1
+    result2 = await run_integrity_check(stream_id, store)
+    assert result2.previous_hash == result1.integrity_hash
+    assert result2.integrity_hash != result1.integrity_hash
+    assert result2.chain_valid is True
+    assert result2.tamper_detected is False
 
-    # Verify the full chain is intact
+    # Verify the full chain is intact via verify_chain directly
     all_events_raw = await store.load_stream_raw(stream_id)
     check_runs = [e for e in all_events_raw if e.event_type == "AuditIntegrityCheckRun"]
     assert len(check_runs) == 2
@@ -58,42 +63,41 @@ async def test_audit_chain_write_and_verify() -> None:
 
 @pytest.mark.asyncio
 async def test_audit_chain_detects_tampering() -> None:
-    """verify_chain must fail if a stored hash doesn't match recomputed hash."""
+    """Tamper detection: modify a stored event payload directly in the DB,
+    then re-run run_integrity_check and assert tamper_detected = True."""
     pool = await get_pool()
     store = EventStore(pool)
 
     stream_id = f"audit-loan-{uuid4()}"
 
+    # Write a domain event and run the first integrity check to seal the chain
     await store.append(
         stream_id,
         [BaseEvent(event_type="ApplicationSubmitted", payload={"application_id": "b1"})],
         expected_version=-1,
     )
+    result1 = await run_integrity_check(stream_id, store)
+    assert result1.chain_valid is True
 
-    h1, _ = await run_integrity_check(stream_id, store)
-
-    # Load events and simulate tampering by injecting a wrong hash into the check run
-    all_events = await store.load_stream(stream_id)
-    check_runs = [e for e in all_events if e.event_type == "AuditIntegrityCheckRun"]
-
-    # Build a fake check run with a wrong integrity_hash
-    from datetime import UTC, datetime
-
-    from ledger.core.models import StoredEvent
-
-    tampered_check = StoredEvent(
-        event_id=check_runs[0].event_id,
-        event_type="AuditIntegrityCheckRun",
-        payload={"integrity_hash": "deadbeef" * 8, "previous_hash": ""},
-        stream_id=stream_id,
-        stream_position=check_runs[0].stream_position,
-        global_position=check_runs[0].global_position,
-        recorded_at=datetime.now(UTC),
+    # --- Direct DB tampering ---
+    # Overwrite the payload of the ApplicationSubmitted event in the DB.
+    # This simulates an attacker modifying a stored event after the chain was sealed.
+    await pool.execute(
+        """
+        UPDATE events
+        SET payload = $1
+        WHERE stream_id = $2
+          AND event_type = 'ApplicationSubmitted'
+        """,
+        json.dumps({"application_id": "TAMPERED"}),
+        stream_id,
     )
 
-    data_events = [e for e in all_events if e.event_type != "AuditIntegrityCheckRun"]
-    ok, msg = verify_chain([tampered_check], data_events + [tampered_check])
-    assert not ok
-    assert "mismatch" in msg.lower()
+    # Re-run the integrity check — the new hash will not match the stored one
+    result2 = await run_integrity_check(stream_id, store)
+    assert result2.tamper_detected is True, (
+        "tamper_detected must be True after direct DB payload modification"
+    )
+    assert result2.chain_valid is False
 
     await pool.close()
