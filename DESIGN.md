@@ -167,13 +167,15 @@ The reason this was not the first implementation: the shard assignment table and
 
 ## 7. Cross-Stream Write Atomicity
 
-The `record_fraud_screening` MCP tool (and the `record_credit_analysis` service command) write the same event to two streams: the agent session stream (to track `contributed_apps` for causal chain validation) and the loan stream (to advance the loan state machine). These two appends are **not atomic**.
+The `record_fraud_screening` MCP tool (and the `record_credit_analysis` service command) write the same event to two streams: the agent session stream (to track `contributed_apps` for causal chain validation) and the loan stream (to advance the loan state machine).
 
-**Failure mode:** If the session stream append succeeds but the loan stream append fails (e.g., due to an `OptimisticConcurrencyError` on the loan stream), the session aggregate will record the contribution but the loan stream will not advance. The caller receives an error and must retry. On retry, the session stream append will fail with a concurrency error (the version has already advanced), which surfaces the partial write to the caller.
+**Resolution:** Both commands now use `EventStore.append_multi()`, which acquires a single database connection, opens one `BEGIN/COMMIT` transaction, and writes to all target streams inside it. If either stream write fails (OCC or otherwise) the entire transaction is rolled back — no partial writes are possible.
 
-**Why this is accepted:** True cross-stream atomicity requires either (a) a distributed transaction (two-phase commit across two stream rows — not supported by our `SELECT ... FOR UPDATE` pattern), or (b) the outbox pattern (write both events to an outbox table in a single transaction, then fan out). The outbox table already exists in the schema for exactly this purpose. The current implementation skips the outbox for simplicity; a production hardening pass would route all cross-stream writes through the outbox to guarantee at-least-once delivery of both appends.
+`append_multi` is implemented by extracting the per-stream write logic into `_append_to_stream_on_conn()`, a private helper that operates on a caller-supplied connection. `append()` (single-stream) delegates to the same helper, so the locking and outbox logic is defined exactly once.
 
-**Mitigation in place:** The retry budget (3 attempts with exponential backoff) means transient failures are recovered automatically. The `OptimisticConcurrencyError` on the session stream during a retry is a reliable signal that the first append succeeded, allowing the caller to skip the session append and proceed directly to the loan append.
+**Remaining limitation:** The outbox table is still written inside the same transaction (correct), but the outbox relay process (polling the outbox and publishing to an external bus) is not yet implemented. This is the Week 10 Polyglot Bridge integration point and is out of scope for this week.
+
+**Update:** An `OutboxRelay` is now implemented in `src/ledger/infrastructure/outbox.py`. It polls unpublished rows with `FOR UPDATE SKIP LOCKED`, invokes a publisher callback, and marks rows as published only after successful delivery. This completes the outbox pattern for at-least-once delivery in the current stack.
 
 ---
 
@@ -200,15 +202,32 @@ The `_is_causally_dependent` function in `src/ledger/core/whatif.py` determines 
 - `stream_id` (TEXT): The aggregate instance ID. Indexed for fast stream loading.
 - `stream_position` (INT): Event order within the stream. Used for optimistic concurrency validation.
 - `event_type` (TEXT): Domain name of the event. Used for routing and filtering.
+- `event_version` (SMALLINT): Enables schema evolution and upcasting without mutating historical data.
 - `payload` (JSONB): The event data.
 - `metadata` (JSONB): Non-domain data (correlation_id, causation_id, agent_metadata).
+- `recorded_at` (TIMESTAMPTZ): Immutable record time; required for temporal queries and upcaster inference.
 
 ### `event_streams` table
 - `stream_id` (TEXT): Unique stream identifier.
+- `aggregate_type` (TEXT): Aggregate category for administrative queries and archive policies.
 - `current_version` (INT): The current position of the last event. Used as the lock point for writes.
+- `created_at` (TIMESTAMPTZ): Auditability of stream creation; supports lifecycle reporting.
+- `archived_at` (TIMESTAMPTZ): Soft-delete marker for retired aggregates; preserves immutability.
+- `metadata` (JSONB): Stream-level attributes (tenant, compliance tier, etc.).
+
+### `projection_checkpoints` table
+- `projection_name` (TEXT): Unique projection identifier.
+- `last_position` (BIGINT): Global position last processed; enables exactly-once replay.
+- `updated_at` (TIMESTAMPTZ): Operational visibility for lag calculations and alerting.
 
 ### `outbox` table
 - `event_id` (UUID): Reference to the event to be published. Ensures at-least-once delivery when paired with a reliable publisher.
+- `id` (UUID): Independent outbox row identity for retries and auditing.
+- `destination` (TEXT): Target channel/bus (Kafka topic, Redis stream, etc.).
+- `payload` (JSONB): Serialized payload for downstream delivery without reloading events.
+- `created_at` (TIMESTAMPTZ): Ordering and retry windows.
+- `published_at` (TIMESTAMPTZ): Delivery acknowledgement for idempotent publishing.
+- `attempts` (SMALLINT): Retry budget and monitoring of delivery failures.
 
 ---
 
@@ -219,11 +238,11 @@ The challenge catalogue is intentionally incomplete. The following events are mi
 | Missing Event | Aggregate | Status / Reason |
 |---|---|---|
 | `FraudScreeningRequested` | `LoanApplication` | **[Implemented]** Symmetry with `CreditAnalysisRequested` — the loan stream should record when fraud screening was initiated, not just when it completed |
-| `AgentSessionClosed` | `AgentSession` | A session needs a terminal event to mark it as complete; without it, `reconstruct_agent_context` cannot distinguish an active session from an abandoned one |
+| `AgentSessionClosed` | `AgentSession` | **[Implemented]** Terminal event to mark session completion; enables crash recovery to distinguish active vs abandoned sessions |
 | `ComplianceClearanceIssued` | `ComplianceRecord` | **[Implemented]** The aggregate needs a terminal event confirming all required checks passed; `ComplianceRulePassed` events alone do not constitute a clearance |
 | `ApplicationWithdrawn` | `LoanApplication` | **[Implemented]** Applicants can withdraw; the state machine needs this transition to reach a terminal state without approval or decline |
-| `HumanReviewOverride` | `LoanApplication` | The model version locking rule (business rule 3) references this event as the only way to supersede a completed credit analysis; it is referenced but not defined in the catalogue |
-| `DecisionOrchestratorSessionStarted` | `AgentSession` | The `DecisionOrchestrator` is an agent and must follow the Gas Town pattern — it needs an `AgentContextLoaded` equivalent to start its session |
+| `HumanReviewOverride` | `LoanApplication` | **[Implemented]** Explicit override event to unlock model version locking without reusing `HumanReviewCompleted` |
+| `DecisionOrchestratorSessionStarted` | `AgentSession` | **[Implemented]** Gas Town entry event for orchestrator sessions |
 | `AuditStreamInitialised` | `AuditLedger` | **[Implemented]** The audit stream needs an identity event recording what entity it covers and when monitoring began |
 
-*(Note: `FraudScreeningRequested`, `ApplicationWithdrawn`, `ComplianceClearanceIssued`, and `AuditStreamInitialised` have now been implemented in the core models.)*
+*(Note: `FraudScreeningRequested`, `ApplicationWithdrawn`, `ComplianceClearanceIssued`, `AuditStreamInitialised`, `AgentSessionClosed`, `DecisionOrchestratorSessionStarted`, and `HumanReviewOverride` have now been implemented in the core models.)*

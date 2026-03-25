@@ -35,6 +35,9 @@ class ApplicationSummaryProjection(BaseProjection):
     async def handle_event(
         self, event: StoredEvent, conn: asyncpg.Connection | None = None
     ) -> None:
+        if event.stream_id.startswith("audit-"):
+            # Audit streams are duplicates for integrity; do not drive summaries.
+            return
         payload = event.payload
         app_id = payload.get("application_id")
         if not app_id:
@@ -96,7 +99,10 @@ class ApplicationSummaryProjection(BaseProjection):
                 UPDATE projection_application_summary 
                 SET state = 'ANALYSIS_COMPLETE', 
                     risk_tier = $1,
-                    agent_sessions_completed = array_append(agent_sessions_completed, $2),
+                    agent_sessions_completed = CASE
+                        WHEN $2 = ANY(agent_sessions_completed) THEN agent_sessions_completed
+                        ELSE array_append(agent_sessions_completed, $2)
+                    END,
                     last_event_type = $3, 
                     last_event_at = $4
                 WHERE application_id = $5

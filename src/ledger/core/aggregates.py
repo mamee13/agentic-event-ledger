@@ -144,6 +144,9 @@ class LoanApplicationAggregate(BaseAggregate[LoanState]):
         elif final_decision == "DECLINE":
             self.state = LoanState.FINAL_DECLINED
 
+    def _apply_human_review_override(self, _event: BaseEvent | StoredEvent) -> None:
+        self.has_human_override = True
+
     def _apply_application_approved(self, _event: BaseEvent | StoredEvent) -> None:
         self.state = LoanState.FINAL_APPROVED
 
@@ -174,6 +177,15 @@ class LoanApplicationAggregate(BaseAggregate[LoanState]):
         override = bool(event.payload.get("override", False))
         override_reason = event.payload.get("override_reason")
         self.guard_human_review(override, override_reason)
+
+    def _guard_human_review_override(self, event: BaseEvent | StoredEvent) -> None:
+        override_reason = event.payload.get("override_reason")
+        if not override_reason:
+            raise DomainRuleError(
+                rule_name="human_review",
+                message="HumanReviewOverride requires override_reason",
+                suggested_action="Provide a reason for the override.",
+            )
 
     def _guard_application_approved(self, _event: BaseEvent | StoredEvent) -> None:
         self.guard_finalize_approval(self.is_compliance_passed)
@@ -293,6 +305,12 @@ class AgentSessionAggregate(BaseAggregate[str]):
         self.agent_id = str(event.payload.get("agent_id", "unknown"))
         self.model_version = str(event.payload.get("model_version", "unknown"))
 
+    def _apply_decision_orchestrator_session_started(self, event: BaseEvent | StoredEvent) -> None:
+        self.context_loaded = True
+        self.is_active = True
+        self.agent_id = str(event.payload.get("agent_id", "unknown"))
+        self.model_version = str(event.payload.get("model_version", "unknown"))
+
     def _apply_credit_analysis_completed(self, event: BaseEvent | StoredEvent) -> None:
         app_id = event.payload.get("application_id")
         if app_id:
@@ -311,6 +329,9 @@ class AgentSessionAggregate(BaseAggregate[str]):
     def _apply_session_terminated(self, _event: BaseEvent | StoredEvent) -> None:
         self.is_active = False
 
+    def _apply_agent_session_closed(self, _event: BaseEvent | StoredEvent) -> None:
+        self.is_active = False
+
     # ------------------------------------------------------------------ guards
 
     def _guard_agent_context_loaded(self, _event: BaseEvent | StoredEvent) -> None:
@@ -322,6 +343,17 @@ class AgentSessionAggregate(BaseAggregate[str]):
                     "context is already loaded."
                 ),
                 suggested_action="Do not replay AgentContextLoaded after session has started.",
+            )
+
+    def _guard_decision_orchestrator_session_started(self, _event: BaseEvent | StoredEvent) -> None:
+        if self.context_loaded:
+            raise DomainRuleError(
+                rule_name="gas_town",
+                message=(
+                    f"DecisionOrchestratorSessionStarted must be the first event in session "
+                    f"{self.id}; context is already loaded."
+                ),
+                suggested_action="Do not replay session start after context is loaded.",
             )
 
     def _guard_credit_analysis_completed(self, _event: BaseEvent | StoredEvent) -> None:

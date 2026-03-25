@@ -198,8 +198,11 @@ class DistributedProjectionDaemon(ProjectionDaemon):
         count = 0
         try:
             async for event in self._store.load_all(
-                from_global_position=lowest_pos, batch_size=self._batch_size
+                from_global_position=lowest_pos,
+                to_global_position=self._global_pos_to,
+                batch_size=self._batch_size,
             ):
+                pos = int(event.global_position)
                 # 0. Check if we lost our lock mid-batch
                 if self._stop_heartbeat.is_set():
                     logger.warning(
@@ -209,25 +212,25 @@ class DistributedProjectionDaemon(ProjectionDaemon):
                     break
 
                 # 1. Check if we reached the end of our shard
-                if self._global_pos_to is not None and event.global_position > self._global_pos_to:
+                if self._global_pos_to is not None and pos > self._global_pos_to:
                     logger.info(
                         "Node %s reached end of shard %s (pos %d > %d)",
                         self._node_id,
                         self._shard_id,
-                        event.global_position,
+                        pos,
                         self._global_pos_to,
                     )
                     self.stop()
                     break
 
                 # 2. Skip events before our shard (should be handled by lowest_pos, but safe)
-                if event.global_position < self._global_pos_from:
+                if pos < self._global_pos_from:
                     continue
 
                 count += 1
                 for projection in self._projections:
-                    if event.global_position > checkpoints[projection.projection_name]:
-                        checkpoints[projection.projection_name] = event.global_position
+                    if pos > checkpoints[projection.projection_name]:
+                        checkpoints[projection.projection_name] = pos
 
                     if event.event_type not in projection.subscribed_events:
                         continue

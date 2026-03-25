@@ -23,13 +23,14 @@ import asyncpg
 from mcp.server.fastmcp import FastMCP
 
 from ledger.application.service import LedgerService
-from ledger.core.agent_context import reconstruct_agent_context
 from ledger.core.models import BaseEvent
 from ledger.core.regulatory_package import generate_regulatory_package
 from ledger.infrastructure.db.connection import get_pool
 from ledger.infrastructure.parsers import parse_any
 from ledger.infrastructure.projections.agent_performance import AgentPerformanceProjection
+from ledger.infrastructure.projections.agent_session_view import AgentSessionViewProjection
 from ledger.infrastructure.projections.application_summary import ApplicationSummaryProjection
+from ledger.infrastructure.projections.audit_trail import AuditTrailProjection
 from ledger.infrastructure.projections.compliance_audit import ComplianceAuditViewProjection
 from ledger.infrastructure.projections.daemon import ProjectionDaemon
 from ledger.infrastructure.store import EventStore
@@ -53,6 +54,8 @@ _service: LedgerService | None = None
 _app_summary: ApplicationSummaryProjection | None = None
 _agent_perf: AgentPerformanceProjection | None = None
 _compliance: ComplianceAuditViewProjection | None = None
+_audit_trail: AuditTrailProjection | None = None
+_agent_sessions: AgentSessionViewProjection | None = None
 _daemon: ProjectionDaemon | None = None
 _daemon_task: asyncio.Task[None] | None = None
 
@@ -102,7 +105,7 @@ def _get_daemon() -> ProjectionDaemon:
 @asynccontextmanager
 async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
     global _pool, _store, _service, _app_summary, _agent_perf, _compliance
-    global _daemon, _daemon_task
+    global _audit_trail, _agent_sessions, _daemon, _daemon_task
 
     _pool = await get_pool()
     setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
@@ -112,9 +115,11 @@ async def lifespan(_app: FastMCP) -> AsyncIterator[None]:
     _app_summary = ApplicationSummaryProjection(_pool)
     _agent_perf = AgentPerformanceProjection(_pool)
     _compliance = ComplianceAuditViewProjection(_pool)
+    _audit_trail = AuditTrailProjection(_pool)
+    _agent_sessions = AgentSessionViewProjection(_pool)
     _daemon = ProjectionDaemon(
         store=_store,
-        projections=[_app_summary, _agent_perf, _compliance],
+        projections=[_app_summary, _agent_perf, _compliance, _audit_trail, _agent_sessions],
         pool=_pool,
         batch_size=200,
     )
@@ -154,6 +159,11 @@ def _err(error: dict[str, Any]) -> dict[str, Any]:
     return {"ok": False, "error": error}
 
 
+def _clean_app_id(application_id: str) -> str:
+    """Strip accidental 'loan-' prefix so agents can pass either form."""
+    return application_id.removeprefix("loan-")
+
+
 # Active regulation sets — rule_id must exist here for record_compliance_check
 _REGULATION_SETS: dict[str, set[str]] = {
     "EU-AI-ACT-2025": {"KYC", "AML", "FRAUD_SCREEN", "DATA_PRIVACY", "MODEL_BIAS"},
@@ -183,6 +193,8 @@ async def register_applicant(
     :param jurisdiction: Country or state code (ISO).
     :param legal_type: Type of entity (LLC, Corporation, Individual).
     :param risk_segment: Initial risk tier (LOW, MEDIUM, HIGH).
+
+    Preconditions: applicant_id must be non-empty; risk_segment must be LOW/MEDIUM/HIGH.
     """
     logger.info(" TOOL: register_applicant (id=%s, name=%s)", applicant_id, name)
     if not applicant_id.strip():
@@ -232,12 +244,16 @@ async def record_document_upload(
 ) -> dict[str, Any]:
     """Record a document upload (e.g., a PDF) for an application.
     This enables background agents to process the document.
+
+    Preconditions: application_id, document_id, and file_path must be non-empty.
     """
     logger.info(" TOOL: record_document_upload (app=%s, file=%s)", application_id, file_path)
     loan_stream = f"loan-{application_id}"
 
     if not application_id.strip():
         return _err(validation_error("application_id must not be empty."))
+    application_id = _clean_app_id(application_id)
+    loan_stream = f"loan-{application_id}"
     if not document_id.strip():
         return _err(validation_error("document_id must not be empty."))
     if not file_path.strip():
@@ -248,18 +264,12 @@ async def record_document_upload(
         return _err(not_found_error(f"Loan application {loan_stream}"))
 
     try:
-        event = BaseEvent(
-            event_type="DocumentUploaded",
-            payload={
-                "application_id": application_id,
-                "document_id": document_id,
-                "file_path": file_path,
-                "document_type": document_type,
-                "uploaded_at": datetime.now().isoformat(),
-            },
+        await _get_service().record_document_upload(
+            loan_id=application_id,
+            document_id=document_id,
+            file_path=file_path,
+            document_type=document_type,
         )
-        l_ver = await _get_store().stream_version(loan_stream)
-        await _get_store().append(loan_stream, [event], expected_version=l_ver)
     except Exception as exc:
         return _err(from_exception(exc, loan_stream))
 
@@ -286,10 +296,13 @@ async def submit_application(
     :param application_id: Unique loan ID (e.g. 'loan-2026-001').
     :param applicant_id: ID of a registered applicant.
     :param requested_amount_usd: Total loan amount requested.
+
+    Preconditions: application_id/applicant_id must be non-empty; requested_amount_usd > 0.
     """
     logger.info(" TOOL: submit_application (app=%s, applicant=%s)", application_id, applicant_id)
     if not application_id.strip():
         return _err(validation_error("application_id must not be empty."))
+    application_id = _clean_app_id(application_id)
     if not applicant_id.strip():
         return _err(validation_error("applicant_id must not be empty."))
     if requested_amount_usd <= 0:
@@ -329,7 +342,10 @@ async def start_agent_session(
     context_source: str = "MLflow Registry",
     context_token_count: int = 1024,
 ) -> dict[str, Any]:
-    """Start a new agent session. Writes AgentContextLoaded as the first event."""
+    """Start a new agent session. Writes AgentContextLoaded as the first event.
+
+    Preconditions: agent_id, session_id, and model_version must be non-empty.
+    """
     logger.info(" TOOL: start_agent_session (agent=%s, session=%s)", agent_id, session_id)
     if not agent_id.strip():
         return _err(validation_error("agent_id must not be empty."))
@@ -385,10 +401,12 @@ async def record_credit_analysis(
 ) -> dict[str, Any]:
     """Record a completed credit analysis.
 
-    Requires an active AgentSession with AgentContextLoaded as first event.
+    Preconditions: AgentSession exists with AgentContextLoaded; loan stream exists;
+    confidence_score in 0.0–1.0; risk_tier in LOW/MEDIUM/HIGH/VERY_HIGH.
     Enforces optimistic concurrency on the loan stream.
     """
     logger.info(" TOOL: record_credit_analysis (app=%s, risk=%s)", application_id, risk_tier)
+    application_id = _clean_app_id(application_id)
     loan_stream = f"loan-{application_id}"
     session_stream = f"agent-{agent_id}-{session_id}"
 
@@ -451,10 +469,11 @@ async def record_fraud_screening(
 ) -> dict[str, Any]:
     """Record a completed fraud screening.
 
-    Requires an active AgentSession with context loaded.
+    Preconditions: AgentSession exists with AgentContextLoaded; loan stream exists;
     fraud_score must be in 0.0–1.0.
     """
     logger.info(" TOOL: record_fraud_screening (app=%s, score=%s)", application_id, fraud_score)
+    application_id = _clean_app_id(application_id)
     loan_stream = f"loan-{application_id}"
     session_stream = f"agent-{agent_id}-{session_id}"
 
@@ -480,29 +499,14 @@ async def record_fraud_screening(
         return _err(not_found_error(f"Loan application {loan_stream}"))
 
     try:
-        event = BaseEvent(
-            event_type="FraudScreeningCompleted",
-            payload={
-                "application_id": application_id,
-                "agent_id": agent_id,
-                "session_id": session_id,
-                "fraud_score": fraud_score,
-                "screening_result": screening_result,
-                "flags": flags or [],
-            },
+        await _get_service().record_fraud_screening(
+            loan_id=application_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            fraud_score=fraud_score,
+            screening_result=screening_result,
+            flags=flags or [],
         )
-        # NOTE: These two appends are NOT atomic — the same pattern used by
-        # record_credit_analysis (service.py). If the session append succeeds
-        # but the loan append fails, the session stream will record the
-        # contribution but the loan stream will not advance. The caller must
-        # retry; the session append is idempotent-safe because the session
-        # stream version check will catch a duplicate on retry.
-        # A fully atomic cross-stream write would require the outbox pattern
-        # (see DESIGN.md §6 for the accepted tradeoff).
-        s_ver = await _get_store().stream_version(session_stream)
-        await _get_store().append(session_stream, [event], expected_version=s_ver)
-        l_ver = await _get_store().stream_version(loan_stream)
-        await _get_store().append(loan_stream, [event], expected_version=l_ver)
     except Exception as exc:
         return _err(from_exception(exc, loan_stream))
 
@@ -527,7 +531,7 @@ async def record_compliance_check(
 ) -> dict[str, Any]:
     """Record a compliance rule result.
 
-    rule_id must exist in the active regulation_set_version.
+    Preconditions: loan stream exists; rule_id must exist in regulation_set_version;
     status must be PASSED or FAILED.
     """
     logger.info(
@@ -536,6 +540,7 @@ async def record_compliance_check(
         rule_id,
         status,
     )
+    application_id = _clean_app_id(application_id)
     loan_stream = f"loan-{application_id}"
 
     if status not in {"PASSED", "FAILED"}:
@@ -593,9 +598,12 @@ async def generate_decision(
 ) -> dict[str, Any]:
     """Generate a decision for a loan application.
 
-    Enforces confidence floor (< 0.6 → REFER) and causal chain validation.
+    Preconditions: loan stream exists; AgentSession exists with context loaded;
+    contributing_sessions is non-empty. Enforces confidence floor (< 0.6 → REFER)
+    and causal chain validation.
     """
     logger.info(" TOOL: generate_decision (app=%s, rec=%s)", application_id, recommendation)
+    application_id = _clean_app_id(application_id)
     loan_stream = f"loan-{application_id}"
 
     if recommendation not in {"APPROVE", "DECLINE", "REFER"}:
@@ -655,7 +663,8 @@ async def record_human_review(
 ) -> dict[str, Any]:
     """Record a human reviewer's decision.
 
-    reviewer_id is required. If override=True, override_reason must be provided.
+    Preconditions: loan stream exists; reviewer_id is required. If override=True,
+    override_reason must be provided.
     """
     logger.info(
         " TOOL: record_human_review (app=%s, reviewer=%s, decision=%s)",
@@ -663,6 +672,7 @@ async def record_human_review(
         reviewer_id,
         final_decision,
     )
+    application_id = _clean_app_id(application_id)
     loan_stream = f"loan-{application_id}"
 
     if not reviewer_id.strip():
@@ -718,7 +728,7 @@ async def request_credit_analysis(application_id: str) -> dict[str, Any]:
     logger.info(" TOOL: request_credit_analysis (app=%s)", application_id)
     if not application_id.strip():
         return _err(validation_error("application_id must not be empty."))
-
+    application_id = _clean_app_id(application_id)
     loan_stream = f"loan-{application_id}"
     if await _get_store().stream_version(loan_stream) == -1:
         return _err(not_found_error(f"Loan application {loan_stream}"))
@@ -754,6 +764,7 @@ async def request_compliance_check(
     logger.info(" TOOL: request_compliance_check (app=%s)", application_id)
     if not application_id.strip():
         return _err(validation_error("application_id must not be empty."))
+    application_id = _clean_app_id(application_id)
 
     if regulation_set_version not in _REGULATION_SETS:
         return _err(
@@ -792,8 +803,8 @@ async def run_integrity_check(
 ) -> dict[str, Any]:
     """Run a cryptographic integrity check on an audit stream.
 
-    Requires compliance_role = 'COMPLIANCE_OFFICER'.
-    Rate-limited to 1 call per minute per entity.
+    Preconditions: compliance_role must be 'COMPLIANCE_OFFICER';
+    rate-limited to 1 call per minute per entity.
     """
     if compliance_role != "COMPLIANCE_OFFICER":
         return _err(
@@ -848,7 +859,7 @@ async def generate_regulatory_package_tool(
     The package is independently verifiable — a regulator can validate it
     without access to the live system.
 
-    Requires compliance_role = 'COMPLIANCE_OFFICER'.
+    Preconditions: compliance_role must be 'COMPLIANCE_OFFICER'.
 
     :param application_id: Loan application ID (without 'loan-' prefix).
     :param examination_date: ISO-8601 datetime string (e.g. '2026-03-21T00:00:00').
@@ -868,6 +879,7 @@ async def generate_regulatory_package_tool(
 
     if not application_id.strip():
         return _err(validation_error("application_id must not be empty."))
+    application_id = _clean_app_id(application_id)
 
     try:
         as_of = datetime.fromisoformat(examination_date)
@@ -906,6 +918,7 @@ async def parse_document(file_path: str) -> dict[str, Any]:
     """Parse a document (PDF, CSV, Excel, Text) and return its contents.
 
     This tool extracts text from PDFs and structured data from CSVs/Excels.
+    Preconditions: file_path must exist.
     """
     logger.info(" TOOL: parse_document (file=%s)", file_path)
     if not file_path.strip():
@@ -931,6 +944,7 @@ async def list_documents(directory_path: str) -> dict[str, Any]:
     """List documents in a directory to discover file paths for parsing.
 
     Useful for finding application_proposal.pdf, financial_summary.csv, etc.
+    Preconditions: directory_path must exist and be a directory.
     """
     logger.info(" TOOL: list_documents (dir=%s)", directory_path)
     if not directory_path.strip():
@@ -966,48 +980,44 @@ async def get_application(application_id: str) -> str:
 
 @mcp.resource("ledger://applications/{application_id}/audit-trail")
 async def get_audit_trail(application_id: str) -> str:
-    """Full audit trail — reads AuditLedger stream directly (not a projection)."""
-    stream_id = f"audit-loan-{application_id}"
-    try:
-        events = await _get_store().load_stream(stream_id)
-    except Exception as exc:
-        return json.dumps(from_exception(exc, stream_id))
+    """Full audit trail from projection (no stream reads)."""
+    rows = await _get_pool().fetch(
+        """
+        SELECT event_type, payload, global_position, recorded_at, source_stream_id
+        FROM projection_audit_trail
+        WHERE application_id = $1
+        ORDER BY global_position ASC
+        """,
+        application_id,
+    )
+    if not rows:
+        return json.dumps(not_found_error(f"Audit trail for {application_id}"))
     return json.dumps(
         [
             {
-                "event_type": e.event_type,
-                "stream_position": e.stream_position,
-                "global_position": e.global_position,
-                "recorded_at": e.recorded_at.isoformat(),
-                "payload": e.payload,
+                "event_type": r["event_type"],
+                "global_position": r["global_position"],
+                "recorded_at": r["recorded_at"].isoformat(),
+                "payload": r["payload"],
+                "source_stream_id": r["source_stream_id"],
             }
-            for e in events
-        ]
+            for r in rows
+        ],
+        default=str,
     )
 
 
 @mcp.resource("ledger://agents/{agent_id}/sessions/{session_id}")
 async def get_agent_session(agent_id: str, session_id: str) -> str:
-    """Agent session context — reads AgentSession stream directly (not a projection)."""
+    """Agent session context from projection (no stream reads)."""
     stream_id = f"agent-{agent_id}-{session_id}"
-    try:
-        ctx = await reconstruct_agent_context(stream_id, _get_store())
-    except Exception as exc:
-        return json.dumps(from_exception(exc, stream_id))
-    return json.dumps(
-        {
-            "session_id": ctx.session_id,
-            "agent_id": ctx.agent_id,
-            "model_version": ctx.model_version,
-            "is_active": ctx.is_active,
-            "last_completed_action": ctx.last_completed_action,
-            "pending_work": ctx.pending_work,
-            "needs_reconciliation": ctx.needs_reconciliation,
-            "total_events": ctx.total_events,
-            "summary": ctx.summary,
-            "recent_events": ctx.recent_events,
-        }
+    row = await _get_pool().fetchrow(
+        "SELECT * FROM projection_agent_sessions WHERE session_id = $1",
+        stream_id,
     )
+    if not row:
+        return json.dumps(not_found_error(f"Session {stream_id}"))
+    return json.dumps(dict(row), default=str)
 
 
 @mcp.resource("ledger://applications/{application_id}/compliance")
@@ -1015,6 +1025,20 @@ async def get_compliance(application_id: str) -> str:
     """Current compliance state from projection."""
     try:
         state = await _get_compliance().get_current_compliance(application_id)
+    except Exception as exc:
+        return json.dumps(from_exception(exc))
+    return json.dumps(state, default=str)
+
+
+@mcp.resource("ledger://applications/{application_id}/compliance-at/{as_of}")
+async def get_compliance_at(application_id: str, as_of: str) -> str:
+    """Historical compliance state at ISO8601 timestamp."""
+    try:
+        when = datetime.fromisoformat(as_of)
+    except ValueError:
+        return json.dumps(validation_error("as_of must be a valid ISO8601 timestamp."))
+    try:
+        state = await _get_compliance().get_compliance_at(application_id, when)
     except Exception as exc:
         return json.dumps(from_exception(exc))
     return json.dumps(state, default=str)
@@ -1037,7 +1061,13 @@ async def get_health() -> str:
     """Health check — returns get_lag() for every projection. Target: <10ms per call."""
     daemon = _get_daemon()
     lags: dict[str, int] = {}
-    for name in ("ApplicationSummary", "AgentPerformanceLedger", "ComplianceAuditView"):
+    for name in (
+        "ApplicationSummary",
+        "AgentPerformanceLedger",
+        "ComplianceAuditView",
+        "AuditTrail",
+        "AgentSessionView",
+    ):
         try:
             lags[name] = await daemon.get_lag(name)
         except Exception:

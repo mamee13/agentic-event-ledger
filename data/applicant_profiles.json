@@ -3,7 +3,7 @@
     "company_id": "COMP-001",
     "name": "Rodriguez Figueroa and Sanchez",
     "industry": "construction",
-    "jurisdiction": "MS",
+    "jurisdiction": "VA",
     "legal_type": "LLC",
     "trajectory": "DECLINING",
     "risk_segment": "MEDIUM",
@@ -43,9 +43,159 @@
     "company_id": "COMP-005",
     "name": "Jones Stanley and Mejia",
     "industry": "logistics",
-    "jurisdiction": "MT",
+    "jurisdiction": "AK",
     "legal_type": "S-Corp",
     "trajectory": "STABLE",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-006",
+    "name": "Clark-Adams",
+    "industry": "technology",
+    "jurisdiction": "PA",
+    "legal_type": "Corp",
+    "trajectory": "DECLINING",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-007",
+    "name": "Watts Robinson and Nguyen",
+    "industry": "retail",
+    "jurisdiction": "IL",
+    "legal_type": "Partnership",
+    "trajectory": "GROWTH",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-008",
+    "name": "Edwards Rios and Foster",
+    "industry": "logistics",
+    "jurisdiction": "WA",
+    "legal_type": "LLC",
+    "trajectory": "DECLINING",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-009",
+    "name": "Ross Robinson and Bright",
+    "industry": "logistics",
+    "jurisdiction": "UT",
+    "legal_type": "Partnership",
+    "trajectory": "RECOVERING",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-010",
+    "name": "Brown James and Ferrell",
+    "industry": "construction",
+    "jurisdiction": "OH",
+    "legal_type": "LLC",
+    "trajectory": "STABLE",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-011",
+    "name": "Peterson Carter and Moore",
+    "industry": "technology",
+    "jurisdiction": "IL",
+    "legal_type": "LLC",
+    "trajectory": "GROWTH",
+    "risk_segment": "LOW",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-012",
+    "name": "Evans Fowler and Lynch",
+    "industry": "other",
+    "jurisdiction": "DE",
+    "legal_type": "Sole Proprietor",
+    "trajectory": "VOLATILE",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-013",
+    "name": "Burns-Rodriguez",
+    "industry": "technology",
+    "jurisdiction": "WY",
+    "legal_type": "Partnership",
+    "trajectory": "RECOVERING",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-014",
+    "name": "Tucker Jones and Hodges",
+    "industry": "manufacturing",
+    "jurisdiction": "MA",
+    "legal_type": "Sole Proprietor",
+    "trajectory": "STABLE",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-015",
+    "name": "Hickman Ltd",
+    "industry": "logistics",
+    "jurisdiction": "KS",
+    "legal_type": "Corp",
+    "trajectory": "STABLE",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-016",
+    "name": "Wright Inc",
+    "industry": "healthcare",
+    "jurisdiction": "VT",
+    "legal_type": "S-Corp",
+    "trajectory": "RECOVERING",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-017",
+    "name": "Jones Inc",
+    "industry": "logistics",
+    "jurisdiction": "SD",
+    "legal_type": "LLC",
+    "trajectory": "STABLE",
+    "risk_segment": "HIGH",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-018",
+    "name": "Kennedy Mueller and Aguirre",
+    "industry": "manufacturing",
+    "jurisdiction": "HI",
+    "legal_type": "Corp",
+    "trajectory": "DECLINING",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-019",
+    "name": "Valdez Lucas and Brown",
+    "industry": "professional_services",
+    "jurisdiction": "MT",
+    "legal_type": "LLC",
+    "trajectory": "VOLATILE",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-020",
+    "name": "Ford-Baxter",
+    "industry": "retail",
+    "jurisdiction": "UT",
+    "legal_type": "Sole Proprietor",
+    "trajectory": "GROWTH",
     "risk_segment": "MEDIUM",
     "compliance_flags": []
   }

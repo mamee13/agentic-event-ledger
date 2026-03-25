@@ -312,6 +312,14 @@ class HumanReviewCompleted(BaseEvent):
     reviewed_at: datetime
 
 
+class HumanReviewOverride(BaseEvent):
+    event_type: str = "HumanReviewOverride"
+    application_id: str
+    reviewer_id: str
+    override_reason: str
+    overridden_at: datetime
+
+
 class ApplicationApproved(BaseEvent):
     event_type: str = "ApplicationApproved"
     application_id: str
@@ -444,6 +452,24 @@ class AgentSessionStarted(BaseEvent):
     context_source: str
     context_token_count: int
     started_at: datetime
+
+
+class DecisionOrchestratorSessionStarted(BaseEvent):
+    event_type: str = "DecisionOrchestratorSessionStarted"
+    session_id: str
+    agent_id: str
+    model_version: str
+    context_source: str
+    context_token_count: int
+    started_at: datetime
+
+
+class AgentSessionClosed(BaseEvent):
+    event_type: str = "AgentSessionClosed"
+    session_id: str
+    agent_id: str
+    reason: str | None = None
+    closed_at: datetime
 
 
 class AgentInputValidated(BaseEvent):
@@ -729,6 +755,7 @@ EVENT_REGISTRY: dict[str, type[BaseEvent]] = {
     "DecisionGenerated": DecisionGenerated,
     "HumanReviewRequested": HumanReviewRequested,
     "HumanReviewCompleted": HumanReviewCompleted,
+    "HumanReviewOverride": HumanReviewOverride,
     "ApplicationApproved": ApplicationApproved,
     "ApplicationDeclined": ApplicationDeclined,
     # DocumentPackage
@@ -743,12 +770,14 @@ EVENT_REGISTRY: dict[str, type[BaseEvent]] = {
     "PackageReadyForAnalysis": PackageReadyForAnalysis,
     # AgentSession
     "AgentSessionStarted": AgentSessionStarted,
+    "DecisionOrchestratorSessionStarted": DecisionOrchestratorSessionStarted,
     "AgentInputValidated": AgentInputValidated,
     "AgentInputValidationFailed": AgentInputValidationFailed,
     "AgentNodeExecuted": AgentNodeExecuted,
     "AgentToolCalled": AgentToolCalled,
     "AgentOutputWritten": AgentOutputWritten,
     "AgentSessionCompleted": AgentSessionCompleted,
+    "AgentSessionClosed": AgentSessionClosed,
     "AgentSessionFailed": AgentSessionFailed,
     "AgentSessionRecovered": AgentSessionRecovered,
     # CreditRecord

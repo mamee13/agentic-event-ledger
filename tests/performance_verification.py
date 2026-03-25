@@ -1,15 +1,29 @@
 import asyncio
+import sys
 import uuid
 from pathlib import Path
 
-import asyncpg
+from ledger.core.models import BaseEvent  # noqa: E402
+from ledger.infrastructure.projections.agent_performance import (
+    AgentPerformanceProjection,  # noqa: E402
+)
+from ledger.infrastructure.projections.application_summary import (
+    ApplicationSummaryProjection,  # noqa: E402
+)
+from ledger.infrastructure.projections.compliance_audit import (
+    ComplianceAuditViewProjection,  # noqa: E402
+)
 
-from ledger.core.models import BaseEvent
-from ledger.infrastructure.projections.agent_performance import AgentPerformanceProjection
-from ledger.infrastructure.projections.application_summary import ApplicationSummaryProjection
-from ledger.infrastructure.projections.compliance_audit import ComplianceAuditViewProjection
-from ledger.infrastructure.projections.daemon import ProjectionDaemon
-from ledger.infrastructure.store import EventStore
+# Ensure src/ is on sys.path when running as a script.
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+import asyncpg  # noqa: E402
+
+from ledger.infrastructure.projections.daemon import ProjectionDaemon  # noqa: E402
+from ledger.infrastructure.store import EventStore  # noqa: E402
 
 
 async def run_load_test() -> None:
@@ -50,10 +64,10 @@ async def run_load_test() -> None:
                 "requested_amount_usd": 5000.0,
             },
         )
-        await store.append(f"application-{app_id}", [event], expected_version=-1)
+        await store.append(f"loan-{app_id}", [event], expected_version=-1)
 
         if i % 5 == 0:
-            v = await store.stream_version(f"application-{app_id}")
+            v = await store.stream_version(f"loan-{app_id}")
             decision_event = BaseEvent(
                 event_type="DecisionGenerated",
                 payload={
@@ -64,13 +78,13 @@ async def run_load_test() -> None:
                     "confidence_score": 0.85,
                 },
             )
-            await store.append(f"application-{app_id}", [decision_event], expected_version=v)
+            await store.append(f"loan-{app_id}", [decision_event], expected_version=v)
 
     print("Polling for lag to drop to 0...")
     for _ in range(40):  # 20 seconds max
         await asyncio.sleep(0.5)
         app_lag = await daemon.get_lag("ApplicationSummary")
-        agent_lag = await daemon.get_lag("AgentPerformance")
+        agent_lag = await daemon.get_lag("AgentPerformanceLedger")
         print(f"Current Lags: App={app_lag}, Agent={agent_lag}")
         if app_lag == 0 and agent_lag == 0:
             print("All caught up!")
@@ -78,7 +92,7 @@ async def run_load_test() -> None:
 
     # 4. Assert SLOs
     app_lag = await daemon.get_lag("ApplicationSummary")
-    agent_lag = await daemon.get_lag("AgentPerformance")
+    agent_lag = await daemon.get_lag("AgentPerformanceLedger")
     assert app_lag <= 5, f"ApplicationSummary lag too high: {app_lag}"
     assert agent_lag <= 5, f"AgentPerformance lag too high: {agent_lag}"
 

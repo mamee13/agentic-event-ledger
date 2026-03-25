@@ -90,9 +90,10 @@ The MCP server listens on port **8000**. Connect any MCP-compatible client to it
 | URI | Backed by |
 |---|---|
 | `ledger://applications/{id}` | ApplicationSummary projection |
-| `ledger://applications/{id}/audit-trail` | AuditLedger stream (direct) |
-| `ledger://applications/{id}/compliance` | ComplianceAuditView projection |
-| `ledger://agents/{id}/sessions/{session_id}` | AgentSession stream (direct) |
+| `ledger://applications/{id}/audit-trail` | AuditTrail projection |
+| `ledger://applications/{id}/compliance` | ComplianceAuditView projection (current state) |
+| `ledger://applications/{id}/compliance-at/{as_of}` | ComplianceAuditView projection (historical state, `as_of` ISO8601) |
+| `ledger://agents/{id}/sessions/{session_id}` | AgentSessionView projection |
 | `ledger://agents/{id}/performance` | AgentPerformance projection |
 | `ledger://ledger/health` | Projection lag for all projections |
 
@@ -104,6 +105,15 @@ A built-in script exists to demonstrate the "Show me the complete decision histo
 uv run python scripts/show_history.py <application_id>
 ```
 *(If you need a sample application to run this against, you can execute `uv run python scripts/generate_demo_data.py` first to generate a full loan application lifecycle.)*
+
+## Outbox Relay (Demo)
+
+To demonstrate the outbox pattern end-to-end, run the relay which polls
+unpublished outbox rows and logs published payloads:
+
+```bash
+uv run python scripts/run_outbox_relay.py
+```
 
 ## Architecture Overview
 See [DESIGN.md](DESIGN.md) for details on the event store, aggregates, and projections. You can also view [DOMAIN_NOTES.md](DOMAIN_NOTES.md) for domain reconnaissance decisions.

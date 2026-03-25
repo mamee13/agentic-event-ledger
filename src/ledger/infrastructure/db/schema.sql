@@ -96,6 +96,30 @@ CREATE TABLE IF NOT EXISTS projection_compliance_history (
   PRIMARY KEY (application_id, global_position)
 );
 
+CREATE TABLE IF NOT EXISTS projection_audit_trail (
+  application_id         TEXT NOT NULL,
+  event_type             TEXT NOT NULL,
+  payload                JSONB NOT NULL,
+  global_position        BIGINT NOT NULL,
+  recorded_at            TIMESTAMPTZ NOT NULL,
+  source_stream_id       TEXT NOT NULL,
+  PRIMARY KEY (application_id, global_position)
+);
+
+CREATE TABLE IF NOT EXISTS projection_agent_sessions (
+  session_id             TEXT PRIMARY KEY,
+  agent_id               TEXT,
+  model_version          TEXT,
+  is_active              BOOLEAN NOT NULL DEFAULT TRUE,
+  last_completed_action  TEXT,
+  pending_work           TEXT,
+  needs_reconciliation   BOOLEAN NOT NULL DEFAULT FALSE,
+  total_events           INT NOT NULL DEFAULT 0,
+  summary                JSONB NOT NULL DEFAULT '[]'::jsonb,
+  recent_events          JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 
 CREATE TABLE IF NOT EXISTS projection_snapshots (
   projection_name        TEXT NOT NULL,

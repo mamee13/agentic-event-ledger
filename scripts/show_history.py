@@ -7,8 +7,14 @@ Usage: python show_history.py <application_id>
 
 import asyncio
 import sys
+from pathlib import Path
 from datetime import UTC, datetime
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from ledger.core.regulatory_package import generate_regulatory_package
 from ledger.infrastructure.db.connection import get_pool

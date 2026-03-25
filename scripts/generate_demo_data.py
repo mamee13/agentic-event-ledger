@@ -1,5 +1,12 @@
 import asyncio
+import sys
+from pathlib import Path
 from uuid import uuid4
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 import ledger.mcp.server as mcp_server
 from ledger.application.service import LedgerService

@@ -422,13 +422,20 @@ async def test_shard_range_filtering() -> None:
         task.cancel()
 
     # Only the 6 events in [pos_from, pos_to] should appear in the projection.
-    processed_count = await pool.fetchval("SELECT COUNT(*) FROM projection_application_summary")
+    # Count only the app_ids we expect — other tests may have inserted rows.
+    processed_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM projection_application_summary WHERE application_id = ANY($1)",
+        list(expected_app_ids),
+    )
     assert processed_count == 6, (
         f"Expected 6 events processed in range [{pos_from}, {pos_to}], got {processed_count}"
     )
 
-    # Verify the correct app_ids were processed.
-    rows_in_proj = await pool.fetch("SELECT application_id FROM projection_application_summary")
+    # Verify the correct app_ids were processed (ignore unrelated rows).
+    rows_in_proj = await pool.fetch(
+        "SELECT application_id FROM projection_application_summary WHERE application_id = ANY($1)",
+        list(expected_app_ids),
+    )
     processed_ids = {r["application_id"] for r in rows_in_proj}
     assert processed_ids == expected_app_ids, (
         f"Wrong app_ids in projection.\nExpected: {expected_app_ids}\nGot: {processed_ids}"

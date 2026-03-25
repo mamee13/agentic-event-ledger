@@ -9,6 +9,7 @@ Stream ID formats:
   audit-{entity_type}-{entity_id}
 """
 
+from datetime import UTC, datetime
 from typing import Any
 
 from ledger.core.aggregates import (
@@ -24,6 +25,81 @@ from ledger.infrastructure.store import EventStore
 class LedgerService:
     def __init__(self, store: EventStore):
         self.store = store
+
+    # ------------------------------------------------------------------ audit helpers
+
+    def _audit_stream_id(self, loan_id: str) -> str:
+        return f"audit-loan-{loan_id}"
+
+    def _extract_application_id(self, events: list[BaseEvent]) -> str | None:
+        app_ids = {
+            e.payload.get("application_id") for e in events if e.payload.get("application_id")
+        }
+        if not app_ids:
+            return None
+        if len(app_ids) > 1:
+            raise ValueError(f"Multiple application_id values found in events: {app_ids}")
+        return str(next(iter(app_ids)))
+
+    def _build_audit_events(
+        self, writes: list[tuple[str, list[BaseEvent], int]]
+    ) -> list[BaseEvent]:
+        audit_events: list[BaseEvent] = []
+        for stream_id, events, _ in writes:
+            for event in events:
+                app_id = event.payload.get("application_id")
+                if not app_id:
+                    continue
+                audit_events.append(
+                    BaseEvent(
+                        event_type=event.event_type,
+                        event_version=event.event_version,
+                        payload=event.payload,
+                        metadata={**event.metadata, "source_stream_id": stream_id},
+                    )
+                )
+        return audit_events
+
+    async def _append_with_audit(
+        self,
+        stream_id: str,
+        events: list[BaseEvent],
+        expected_version: int,
+        correlation_id: str | None,
+        causation_id: str | None,
+    ) -> None:
+        writes = [(stream_id, events, expected_version)]
+        await self._append_multi_with_audit(writes, correlation_id, causation_id)
+
+    async def _append_multi_with_audit(
+        self,
+        writes: list[tuple[str, list[BaseEvent], int]],
+        correlation_id: str | None,
+        causation_id: str | None,
+    ) -> None:
+        audit_events = self._build_audit_events(writes)
+        if not audit_events:
+            await self.store.append_multi(
+                writes, correlation_id=correlation_id, causation_id=causation_id
+            )
+            return
+
+        app_id = self._extract_application_id(audit_events)
+        if not app_id:
+            await self.store.append_multi(
+                writes, correlation_id=correlation_id, causation_id=causation_id
+            )
+            return
+
+        audit_stream_id = self._audit_stream_id(app_id)
+        audit_expected = await self.store.stream_version(audit_stream_id)
+
+        audit_write = (audit_stream_id, audit_events, audit_expected if audit_expected >= 0 else -1)
+        await self.store.append_multi(
+            [*writes, audit_write],
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+        )
 
     # ------------------------------------------------------------------ loaders
 
@@ -63,10 +139,39 @@ class LedgerService:
                 "submitted_at": "2026-03-17T00:00:00Z",
             },
         )
-        await self.store.append(
+        await self._append_with_audit(
             f"loan-{loan_id}",
             [event],
             expected_version=-1,
+            correlation_id=correlation_id,
+            causation_id=causation_id,
+        )
+
+    async def record_document_upload(
+        self,
+        loan_id: str,
+        document_id: str,
+        file_path: str,
+        document_type: str,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> None:
+        """Record a document upload event to the loan stream."""
+        event = BaseEvent(
+            event_type="DocumentUploaded",
+            payload={
+                "application_id": loan_id,
+                "document_id": document_id,
+                "file_path": file_path,
+                "document_type": document_type,
+                "uploaded_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        loan = await self._load_loan(loan_id)
+        await self._append_with_audit(
+            f"loan-{loan_id}",
+            [event],
+            expected_version=loan.version,
             correlation_id=correlation_id,
             causation_id=causation_id,
         )
@@ -91,7 +196,7 @@ class LedgerService:
                 "model_version": model_version,
             },
         )
-        await self.store.append(
+        await self._append_with_audit(
             f"agent-{agent_id}-{session_id}",
             [event],
             expected_version=-1,
@@ -108,7 +213,7 @@ class LedgerService:
         """Transition loan to AWAITING_ANALYSIS."""
         loan = await self._load_loan(loan_id)
         event = BaseEvent(event_type="CreditAnalysisRequested", payload={"application_id": loan_id})
-        await self.store.append(
+        await self._append_with_audit(
             f"loan-{loan_id}",
             [event],
             expected_version=loan.version,
@@ -158,22 +263,16 @@ class LedgerService:
             },
         )
 
-        # Capture versions before apply() or append
+        # Capture versions before append
         loan_version = loan.version
         session_version = session.version
 
-        # 4. Append
-        await self.store.append(
-            f"loan-{loan_id}",
-            [event],
-            expected_version=loan_version,
-            correlation_id=correlation_id,
-            causation_id=causation_id,
-        )
-        await self.store.append(
-            f"agent-{agent_id}-{session_id}",
-            [event],
-            expected_version=session_version,
+        # 4. Append both streams atomically — one transaction, no partial-write risk
+        await self._append_multi_with_audit(
+            [
+                (f"loan-{loan_id}", [event], loan_version),
+                (f"agent-{agent_id}-{session_id}", [event], session_version),
+            ],
             correlation_id=correlation_id,
             causation_id=causation_id,
         )
@@ -200,19 +299,50 @@ class LedgerService:
 
         loan_event = BaseEvent(event_type="ComplianceCheckRequested", payload=payload)
         comp_event = BaseEvent(event_type="ComplianceCheckRequested", payload=payload)
-
-        await self.store.append(
-            f"loan-{loan_id}",
-            [loan_event],
-            expected_version=loan.version,
+        comp_expected = compliance.version if compliance.version >= 0 else -1
+        await self._append_multi_with_audit(
+            [
+                (f"loan-{loan_id}", [loan_event], loan.version),
+                (f"compliance-{loan_id}", [comp_event], comp_expected),
+            ],
             correlation_id=correlation_id,
             causation_id=causation_id,
         )
-        comp_expected = compliance.version if compliance.version >= 0 else -1
-        await self.store.append(
-            f"compliance-{loan_id}",
-            [comp_event],
-            expected_version=comp_expected,
+
+    async def record_fraud_screening(
+        self,
+        loan_id: str,
+        agent_id: str,
+        session_id: str,
+        fraud_score: float,
+        screening_result: str,
+        flags: list[str],
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> None:
+        """Record a completed fraud screening to both loan and agent session streams."""
+        session = await self._load_session(agent_id, session_id)
+        loan = await self._load_loan(loan_id)
+
+        session.guard_context_loaded()
+
+        event = BaseEvent(
+            event_type="FraudScreeningCompleted",
+            payload={
+                "application_id": loan_id,
+                "agent_id": agent_id,
+                "session_id": session_id,
+                "fraud_score": fraud_score,
+                "screening_result": screening_result,
+                "flags": flags,
+            },
+        )
+
+        await self._append_multi_with_audit(
+            [
+                (f"loan-{loan_id}", [event], loan.version),
+                (f"agent-{agent_id}-{session_id}", [event], session.version),
+            ],
             correlation_id=correlation_id,
             causation_id=causation_id,
         )
@@ -248,7 +378,7 @@ class LedgerService:
 
         event = BaseEvent(event_type=event_type, payload=payload)
         comp_expected = compliance.version if compliance.version >= 0 else -1
-        await self.store.append(
+        await self._append_with_audit(
             f"compliance-{loan_id}",
             [event],
             expected_version=comp_expected,
@@ -274,7 +404,7 @@ class LedgerService:
             # Capture version before apply() increments it, then validate
             loan_version = loan.version
             loan.apply(loan_clearance)
-            await self.store.append(
+            await self._append_with_audit(
                 f"loan-{loan_id}",
                 [loan_clearance],
                 expected_version=loan_version,
@@ -340,18 +470,12 @@ class LedgerService:
         loan_version = loan.version
         session_version = session.version
 
-        # 4. Append
-        await self.store.append(
-            f"loan-{loan_id}",
-            [event],
-            expected_version=loan_version,
-            correlation_id=correlation_id,
-            causation_id=causation_id,
-        )
-        await self.store.append(
-            f"agent-{agent_id}-{session_id}",
-            [event],
-            expected_version=session_version,
+        # 4. Append both streams atomically — one transaction, no partial-write risk
+        await self._append_multi_with_audit(
+            [
+                (f"loan-{loan_id}", [event], loan_version),
+                (f"agent-{agent_id}-{session_id}", [event], session_version),
+            ],
             correlation_id=correlation_id,
             causation_id=causation_id,
         )
@@ -394,7 +518,7 @@ class LedgerService:
         )
 
         # 4. Append
-        await self.store.append(
+        await self._append_with_audit(
             f"loan-{loan_id}",
             [event],
             expected_version=loan.version,
@@ -430,7 +554,7 @@ class LedgerService:
         )
 
         # 4. Append
-        await self.store.append(
+        await self._append_with_audit(
             f"loan-{loan_id}",
             [event],
             expected_version=loan.version,
@@ -450,7 +574,7 @@ class LedgerService:
             event_type="ApplicationDeclined",
             payload={"application_id": loan_id},
         )
-        await self.store.append(
+        await self._append_with_audit(
             f"loan-{loan_id}",
             [event],
             expected_version=loan.version,

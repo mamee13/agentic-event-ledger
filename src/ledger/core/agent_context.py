@@ -24,6 +24,7 @@ _PARTIAL_EVENT_TYPES = {
     "FraudScreeningRequested",
     "ComplianceCheckRequested",
     "AgentContextLoaded",  # session started but nothing done yet
+    "DecisionOrchestratorSessionStarted",
 }
 
 
@@ -76,7 +77,7 @@ async def reconstruct_agent_context(
     model_version: str | None = first.payload.get("model_version")
 
     # Determine active status
-    is_active = events[-1].event_type != "SessionTerminated"
+    is_active = events[-1].event_type not in {"SessionTerminated", "AgentSessionClosed"}
 
     # Identify last completed action and pending work
     last_completed: str | None = None

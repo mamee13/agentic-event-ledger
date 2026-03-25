@@ -85,6 +85,97 @@ class EventStore:
                 data["payload"] = {**data["payload"], "_session_model_cache": cache}
         return data
 
+    async def _append_to_stream_on_conn(
+        self,
+        conn: asyncpg.Connection,
+        stream_id: str,
+        events: list[BaseEvent],
+        expected_version: int,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> int:
+        """Write events to one stream using an existing connection/transaction.
+
+        Locks the stream row, validates expected_version, inserts events and
+        outbox entries, and updates current_version — all within the caller's
+        transaction.  Raises OptimisticConcurrencyError on version mismatch.
+        """
+        if expected_version == -1:
+            agg_type = stream_id.split("-")[0]
+            try:
+                await conn.execute(
+                    "INSERT INTO event_streams (stream_id, aggregate_type, current_version) "
+                    "VALUES ($1, $2, 0)",
+                    stream_id,
+                    agg_type,
+                )
+            except asyncpg.UniqueViolationError as err:
+                raise OptimisticConcurrencyError(
+                    stream_id=stream_id,
+                    expected_version=-1,
+                    actual_version=0,
+                ) from err
+            current_v = 0
+        else:
+            row = await conn.fetchrow(
+                "SELECT current_version FROM event_streams WHERE stream_id = $1 FOR UPDATE",
+                stream_id,
+            )
+            if not row:
+                raise OptimisticConcurrencyError(
+                    stream_id=stream_id, expected_version=expected_version, actual_version=-1
+                )
+            current_v = row["current_version"]
+            if current_v != expected_version:
+                raise OptimisticConcurrencyError(
+                    stream_id=stream_id,
+                    expected_version=expected_version,
+                    actual_version=current_v,
+                )
+
+        new_v = current_v
+        for event in events:
+            new_v += 1
+            event_id = await conn.fetchval(
+                """
+                INSERT INTO events
+                (stream_id, stream_position, event_type, event_version, payload, metadata)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                RETURNING event_id
+                """,
+                stream_id,
+                new_v,
+                event.event_type,
+                event.event_version,
+                json.dumps(event.payload),
+                json.dumps(
+                    {
+                        **event.metadata,
+                        "correlation_id": correlation_id,
+                        "causation_id": causation_id,
+                    }
+                ),
+            )
+            logger.info(
+                " Store: Appended %s to %s at pos %d",
+                event.event_type,
+                stream_id,
+                new_v,
+            )
+            await conn.execute(
+                "INSERT INTO outbox (event_id, destination, payload) VALUES ($1, $2, $3)",
+                event_id,
+                "ALL",
+                json.dumps(event.payload),
+            )
+
+        await conn.execute(
+            "UPDATE event_streams SET current_version = $1 WHERE stream_id = $2",
+            new_v,
+            stream_id,
+        )
+        return int(new_v)
+
     async def append(
         self,
         stream_id: str,
@@ -93,98 +184,38 @@ class EventStore:
         correlation_id: str | None = None,
         causation_id: str | None = None,
     ) -> int:
-        """
-        Atomically appends events to stream_id.
+        """Atomically appends events to stream_id.
+
         Raises OptimisticConcurrencyError if stream version != expected_version.
         Writes to outbox in same transaction.
         """
         async with self._pool.acquire() as conn, conn.transaction():
-            # 1. Lock stream and check version
-            # -1 means new stream expected
-            if expected_version == -1:
-                # Try to insert into event_streams, will fail if already exists
-                # We use a row lock for existing streams
-                agg_type = stream_id.split("-")[0]
-                try:
-                    await conn.execute(
-                        "INSERT INTO event_streams (stream_id, aggregate_type, current_version) "
-                        "VALUES ($1, $2, 0)",
-                        stream_id,
-                        agg_type,
-                    )
-                except asyncpg.UniqueViolationError as err:
-                    raise OptimisticConcurrencyError(
-                        stream_id=stream_id,
-                        expected_version=-1,
-                        actual_version=0,  # Simplified
-                    ) from err
-                current_v = 0
-            else:
-                row = await conn.fetchrow(
-                    "SELECT current_version FROM event_streams WHERE stream_id = $1 FOR UPDATE",
-                    stream_id,
-                )
-                if not row:
-                    raise OptimisticConcurrencyError(
-                        stream_id=stream_id, expected_version=expected_version, actual_version=-1
-                    )
-                current_v = row["current_version"]
-                if current_v != expected_version:
-                    raise OptimisticConcurrencyError(
-                        stream_id=stream_id,
-                        expected_version=expected_version,
-                        actual_version=current_v,
-                    )
-
-            # 2. Append events
-            new_v = current_v
-            for event in events:
-                new_v += 1
-                event_id = await conn.fetchval(
-                    """
-                        INSERT INTO events 
-                        (stream_id, stream_position, event_type, event_version, payload, metadata)
-                        VALUES ($1, $2, $3, $4, $5, $6)
-                        RETURNING event_id
-                        """,
-                    stream_id,
-                    new_v,
-                    event.event_type,
-                    event.event_version,
-                    json.dumps(event.payload),
-                    json.dumps(
-                        {
-                            **event.metadata,
-                            "correlation_id": correlation_id,
-                            "causation_id": causation_id,
-                        }
-                    ),
-                )
-                logger.info(
-                    " Store: Appended %s to %s at pos %d",
-                    event.event_type,
-                    stream_id,
-                    new_v,
-                )
-
-                # 3. Write to outbox
-                await conn.execute(
-                    "INSERT INTO outbox (event_id, destination, payload) VALUES ($1, $2, $3)",
-                    event_id,
-                    "ALL",
-                    json.dumps(event.payload),
-                )
-
-            # 4. Update stream version
-            await conn.execute(
-                "UPDATE event_streams SET current_version = $1 WHERE stream_id = $2",
-                new_v,
-                stream_id,
+            return await self._append_to_stream_on_conn(
+                conn, stream_id, events, expected_version, correlation_id, causation_id
             )
 
-            return int(new_v)
+    async def append_multi(
+        self,
+        writes: list[tuple[str, list[BaseEvent], int]],
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+    ) -> dict[str, int]:
+        """Atomically appends events to multiple streams in a single transaction.
 
-        return -1
+        ``writes`` is a list of (stream_id, events, expected_version) tuples.
+        All streams are locked and written inside one BEGIN/COMMIT block — if
+        any write fails (OCC or otherwise) the entire transaction is rolled back.
+
+        Returns a dict of {stream_id: new_version} for every stream written.
+        """
+        results: dict[str, int] = {}
+        async with self._pool.acquire() as conn, conn.transaction():
+            for stream_id, events, expected_version in writes:
+                new_v = await self._append_to_stream_on_conn(
+                    conn, stream_id, events, expected_version, correlation_id, causation_id
+                )
+                results[stream_id] = new_v
+        return results
 
     async def load_stream(
         self,
@@ -220,6 +251,7 @@ class EventStore:
     async def load_all(
         self,
         from_global_position: int = 0,
+        to_global_position: int | None = None,
         event_types: list[str] | None = None,
         batch_size: int = 500,
     ) -> AsyncIterator[StoredEvent]:
@@ -228,6 +260,10 @@ class EventStore:
         while True:
             query = "SELECT * FROM events WHERE global_position > $1"
             params: list[Any] = [current_pos]
+
+            if to_global_position is not None:
+                query += f" AND global_position <= ${len(params) + 1}"
+                params.append(to_global_position)
 
             if event_types:
                 query += f" AND event_type = ANY(${len(params) + 1})"

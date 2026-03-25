@@ -207,6 +207,9 @@ class ComplianceAuditViewProjection(BaseProjection):
         inside a single transaction, so readers never see a gap.
         """
         async with self._pool.acquire() as conn:
+            # 0. Invalidate snapshots for this projection (schema or logic changes).
+            await self.invalidate_snapshots(conn)
+
             # 1. Ensure the stable view exists (idempotent)
             await conn.execute(
                 """
@@ -282,3 +285,14 @@ class ComplianceAuditViewProjection(BaseProjection):
                 self.projection_name,
                 max_pos or 0,
             )
+
+    async def invalidate_snapshots(self, conn: asyncpg.Connection) -> None:
+        """Deletes all snapshots for this projection.
+
+        Called before rebuilds to ensure upcaster/schema changes do not reuse
+        stale snapshot state.
+        """
+        await conn.execute(
+            "DELETE FROM projection_snapshots WHERE projection_name = $1",
+            self.projection_name,
+        )

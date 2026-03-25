@@ -179,6 +179,19 @@ class HumanReviewCompleted(BaseEvent):
     payload: dict[str, Any]
 
 
+class HumanReviewOverride(BaseEvent):
+    """A human reviewer explicitly overrides prior automated analysis."""
+
+    event_type: str = "HumanReviewOverride"
+
+    class Payload(BaseModel):
+        application_id: str
+        reviewer_id: str
+        override_reason: str
+
+    payload: dict[str, Any]
+
+
 class ApplicationApproved(BaseEvent):
     """A loan application has been approved."""
 
@@ -231,6 +244,35 @@ class SessionTerminated(BaseEvent):
     class Payload(BaseModel):
         session_id: str
         reason: str | None = None
+
+    payload: dict[str, Any]
+
+
+class AgentSessionClosed(BaseEvent):
+    """An AI agent session has been closed explicitly."""
+
+    event_type: str = "AgentSessionClosed"
+
+    class Payload(BaseModel):
+        agent_id: str
+        session_id: str
+        reason: str | None = None
+
+    payload: dict[str, Any]
+
+
+class DecisionOrchestratorSessionStarted(BaseEvent):
+    """Decision Orchestrator session started (Gas Town pattern entry event)."""
+
+    event_type: str = "DecisionOrchestratorSessionStarted"
+
+    class Payload(BaseModel):
+        agent_id: str
+        session_id: str
+        model_version: str
+        context_source: str
+        event_replay_from_position: int
+        context_token_count: int
 
     payload: dict[str, Any]
 
