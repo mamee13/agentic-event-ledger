@@ -43,6 +43,13 @@ async def _write_app_submitted(store: EventStore, app_id: str | None = None) -> 
                     "application_id": app_id,
                     "applicant_id": f"user-{app_id[:8]}",
                     "requested_amount_usd": 1000.0,
+                    "loan_purpose": "PERSONAL",
+                    "loan_term_months": 36,
+                    "submission_channel": "WEB",
+                    "contact_email": f"user-{app_id[:8]}@example.com",
+                    "contact_name": "Test User",
+                    "submitted_at": "2024-01-01T12:00:00Z",
+                    "application_reference": f"REF-{app_id[:8]}",
                 },
             )
         ],
@@ -225,7 +232,11 @@ async def test_two_shards_process_events_without_duplication() -> None:
     pool = await get_pool()
     store = EventStore(pool)
 
-    # Write 10 events before starting daemons
+    # Record the current high-water mark so both daemons start scanning
+    # from here and don't have to replay the entire test DB history.
+    start_pos = await pool.fetchval("SELECT COALESCE(MAX(global_position), 0) FROM events") or 0
+
+    # Write 10 events after the watermark
     app_ids = []
     for _ in range(10):
         app_id = await _write_app_submitted(store)
@@ -242,6 +253,7 @@ async def test_two_shards_process_events_without_duplication() -> None:
         pool=pool,
         shard_id=f"shard-0-{shard_suffix}",
         node_id="node-shard-0",
+        global_pos_from=int(start_pos) + 1,
         batch_size=50,
     )
     daemon_b = DistributedProjectionDaemon(
@@ -250,13 +262,14 @@ async def test_two_shards_process_events_without_duplication() -> None:
         pool=pool,
         shard_id=f"shard-1-{shard_suffix}",
         node_id="node-shard-1",
+        global_pos_from=int(start_pos) + 1,
         batch_size=50,
     )
 
     task_a = asyncio.create_task(daemon_a.run_forever(poll_interval_ms=50))
     task_b = asyncio.create_task(daemon_b.run_forever(poll_interval_ms=50))
 
-    # Wait until all 10 app_ids appear in the summary table (both daemons processing)
+    # Wait until all 10 app_ids appear in the summary table
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         await asyncio.sleep(0.1)
@@ -354,34 +367,53 @@ async def test_lock_released_after_daemon_stops() -> None:
 
 @pytest.mark.asyncio
 async def test_shard_range_filtering() -> None:
-    """A daemon with bound (10, 20) only processes events in that range."""
+    """A daemon with a bounded range only processes events within that range."""
     pool = await get_pool()
     store = EventStore(pool)
 
-    # Need events at specific positions.
-    # We'll just write 25 events and see where they land.
-    # Note: global_position starts from 1.
-    for _ in range(25):
-        await _write_app_submitted(store)
+    # Snapshot the current high-water mark so we work with relative positions.
+    base = await pool.fetchval("SELECT COALESCE(MAX(global_position), 0) FROM events") or 0
+    base = int(base)
+
+    # Write 20 events — we'll bound the shard to the middle 6 (events 5–10 above base).
+    written_ids = []
+    for _ in range(20):
+        app_id = await _write_app_submitted(store)
+        written_ids.append(app_id)
+
+    # Find the actual global positions of the 20 events we just wrote.
+    rows = await pool.fetch(
+        """
+        SELECT global_position, payload->>'application_id' AS app_id
+        FROM events
+        WHERE global_position > $1 AND event_type = 'ApplicationSubmitted'
+        ORDER BY global_position ASC
+        """,
+        base,
+    )
+    assert len(rows) >= 20, f"Expected at least 20 new events, got {len(rows)}"
+
+    # Pick the 5th through 10th events (0-indexed: indices 4–9) as our shard range.
+    shard_rows = rows[4:10]
+    pos_from = int(shard_rows[0]["global_position"])
+    pos_to = int(shard_rows[-1]["global_position"])
+    expected_app_ids = {r["app_id"] for r in shard_rows}
 
     proj = ApplicationSummaryProjection(pool)
-    # Clear projection table first for isolation
+    # Clear projection table for isolation
     await pool.execute("DELETE FROM projection_application_summary")
 
-    # Shard for events [10, 15]
     daemon = DistributedProjectionDaemon(
         store=store,
         projections=[proj],
         pool=pool,
         shard_id=f"range-shard-{uuid4()}",
-        global_pos_from=10,
-        global_pos_to=15,
+        global_pos_from=pos_from,
+        global_pos_to=pos_to,
         batch_size=50,
     )
 
-    # Run for a few batches then stop
     task = asyncio.create_task(daemon.run_forever(poll_interval_ms=50))
-    # Give it time to process and reach the end
     await asyncio.sleep(1.0)
     daemon.stop()
     try:
@@ -389,11 +421,17 @@ async def test_shard_range_filtering() -> None:
     except (TimeoutError, asyncio.CancelledError):
         task.cancel()
 
-    # Query the summary table
-    # We expect exactly 6 apps (10, 11, 12, 13, 14, 15)
+    # Only the 6 events in [pos_from, pos_to] should appear in the projection.
     processed_count = await pool.fetchval("SELECT COUNT(*) FROM projection_application_summary")
     assert processed_count == 6, (
-        f"Expected 6 events processed in range [10, 15], got {processed_count}"
+        f"Expected 6 events processed in range [{pos_from}, {pos_to}], got {processed_count}"
+    )
+
+    # Verify the correct app_ids were processed.
+    rows_in_proj = await pool.fetch("SELECT application_id FROM projection_application_summary")
+    processed_ids = {r["application_id"] for r in rows_in_proj}
+    assert processed_ids == expected_app_ids, (
+        f"Wrong app_ids in projection.\nExpected: {expected_app_ids}\nGot: {processed_ids}"
     )
 
     await pool.close()
