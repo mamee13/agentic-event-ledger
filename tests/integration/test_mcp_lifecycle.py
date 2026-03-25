@@ -29,6 +29,8 @@ from ledger.mcp.server import (
     record_compliance_check,
     record_credit_analysis,
     record_human_review,
+    request_compliance_check,
+    request_credit_analysis,
     run_integrity_check,
     start_agent_session,
     submit_application,
@@ -107,18 +109,10 @@ async def test_full_mcp_lifecycle() -> None:
     assert dup["error"]["error_type"] == "VALIDATION_ERROR"
 
     # ------------------------------------------------------------------ 4. record credit analysis
-    # First need to transition loan to AWAITING_ANALYSIS via service directly
-    # (the MCP tool record_credit_analysis expects the loan to be in AWAITING_ANALYSIS)
-    store = mcp_server._store
-    assert store is not None
-    from ledger.core.models import BaseEvent
-
-    loan_ver = await store.stream_version(f"loan-{app_id}")
-    await store.append(
-        f"loan-{app_id}",
-        [BaseEvent(event_type="CreditAnalysisRequested", payload={"application_id": app_id})],
-        expected_version=loan_ver,
-    )
+    # Transition loan to AWAITING_ANALYSIS via tool
+    result = await request_credit_analysis(application_id=app_id)
+    assert result["ok"] is True, result
+    assert result["state"] == "AWAITING_ANALYSIS"
 
     result = await record_credit_analysis(
         application_id=app_id,
@@ -132,17 +126,19 @@ async def test_full_mcp_lifecycle() -> None:
     assert result["ok"] is True, result
 
     # ------------------------------------------------------------------ 5. compliance checks
-    # Transition loan to COMPLIANCE_REVIEW
-    service = mcp_server._service
-    assert service is not None
-    await service.request_compliance_check(app_id)
+    # Transition loan to COMPLIANCE_REVIEW via tool
+    result = await request_compliance_check(
+        application_id=app_id, regulation_set_version="EU-AI-ACT-2024"
+    )
+    assert result["ok"] is True, result
+    assert result["state"] == "COMPLIANCE_REVIEW"
 
     for rule in ("KYC", "AML", "FRAUD_SCREEN"):
         result = await record_compliance_check(
             application_id=app_id,
             rule_id=rule,
             status="PASSED",
-            regulation_set_version="EU-AI-ACT-2025",
+            regulation_set_version="EU-AI-ACT-2024",
         )
         assert result["ok"] is True, result
 
@@ -169,15 +165,8 @@ async def test_full_mcp_lifecycle() -> None:
     await submit_application(
         application_id=app_id2, applicant_id="user-002", requested_amount_usd=5000.0
     )
-    # Drive through analysis + compliance for app2
-    store2 = mcp_server._store
-    assert store2 is not None
-    v = await store2.stream_version(f"loan-{app_id2}")
-    await store2.append(
-        f"loan-{app_id2}",
-        [BaseEvent(event_type="CreditAnalysisRequested", payload={"application_id": app_id2})],
-        expected_version=v,
-    )
+    # Drive through analysis + compliance for app2 via tools
+    await request_credit_analysis(application_id=app_id2)
     await record_credit_analysis(
         application_id=app_id2,
         agent_id=agent_id2,
@@ -186,10 +175,14 @@ async def test_full_mcp_lifecycle() -> None:
         confidence_score=0.45,  # below floor
         reasoning="Risky",
     )
-    assert service is not None
-    await service.request_compliance_check(app_id2)
+    await request_compliance_check(application_id=app_id2, regulation_set_version="EU-AI-ACT-2024")
     for rule in ("KYC", "AML", "FRAUD_SCREEN"):
-        await record_compliance_check(application_id=app_id2, rule_id=rule, status="PASSED")
+        await record_compliance_check(
+            application_id=app_id2,
+            rule_id=rule,
+            status="PASSED",
+            regulation_set_version="EU-AI-ACT-2024",
+        )
     low_conf = await generate_decision(
         application_id=app_id2,
         agent_id=agent_id2,
@@ -359,3 +352,68 @@ async def test_regulatory_package_full() -> None:
     assert len(pkg["event_stream"]) >= 1
     assert pkg["package_checksum"] != ""
     assert pkg["integrity_verification"]["is_valid"] is True
+
+
+@pytest.mark.asyncio
+async def test_causal_chain_rejects_unrelated_session() -> None:
+    """Rule 6: generate_decision must reject a contributing session that never
+    processed the loan. The service loads each AgentSessionAggregate and calls
+    validate_causal_chain — this test proves the wiring is end-to-end, not just
+    at the aggregate unit level."""
+    app_id = str(uuid4())
+    agent_id = f"agent-{uuid4()}"
+    session_id = str(uuid4())
+
+    # Unrelated session — started but never processed this loan
+    unrelated_agent_id = f"agent-{uuid4()}"
+    unrelated_session_id = str(uuid4())
+
+    # Start both sessions
+    await start_agent_session(agent_id=agent_id, session_id=session_id, model_version="v2.0")
+    await start_agent_session(
+        agent_id=unrelated_agent_id, session_id=unrelated_session_id, model_version="v2.0"
+    )
+
+    # Drive the loan through to PENDING_DECISION using the real session
+    await submit_application(
+        application_id=app_id, applicant_id="user-causal-001", requested_amount_usd=10000.0
+    )
+    await request_credit_analysis(application_id=app_id)
+    await record_credit_analysis(
+        application_id=app_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        risk_tier="LOW",
+        confidence_score=0.9,
+        reasoning="Clean history",
+    )
+    await request_compliance_check(application_id=app_id)
+    for rule in ("KYC", "AML", "FRAUD_SCREEN", "DATA_PRIVACY", "MODEL_BIAS"):
+        await record_compliance_check(application_id=app_id, rule_id=rule, status="PASSED")
+
+    # Attempt to generate a decision citing the UNRELATED session — must be rejected
+    result = await generate_decision(
+        application_id=app_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        recommendation="APPROVE",
+        confidence_score=0.9,
+        contributing_sessions=[
+            {"agent_id": unrelated_agent_id, "session_id": unrelated_session_id}
+        ],
+    )
+    assert result["ok"] is False, f"Expected causal chain rejection, got: {result}"
+    assert result["error"]["error_type"] == "DOMAIN_RULE_VIOLATION"
+    assert "Causal Chain" in result["error"]["message"]
+
+    # Now generate with the CORRECT session — must succeed
+    result = await generate_decision(
+        application_id=app_id,
+        agent_id=agent_id,
+        session_id=session_id,
+        recommendation="APPROVE",
+        confidence_score=0.9,
+        contributing_sessions=[{"agent_id": agent_id, "session_id": session_id}],
+    )
+    assert result["ok"] is True, f"Expected success with correct session, got: {result}"
+    assert result["recommendation"] == "APPROVE"

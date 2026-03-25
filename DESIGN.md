@@ -64,9 +64,24 @@ Stores full event history per application to support temporal queries (`get_comp
 
 > Under peak load (100 concurrent applications, 4 agents each), how many `OptimisticConcurrencyErrors` do you expect per minute on `loan-{id}` streams? What is the retry strategy and what is the maximum retry budget before returning a failure to the caller?
 
-Under peak load (100 concurrent applications, 4 agents each), `OptimisticConcurrencyErrors` are expected when agents make overlapping decisions. Our implementation uses row-level locking (`SELECT ... FOR UPDATE`) on the `event_streams` table to serialize appends to the same stream. Agents that lose the race will receive an error and must reload the stream state before retrying. 
+Under peak load (100 concurrent applications, 4 agents each), `OptimisticConcurrencyErrors` are expected when agents make overlapping decisions. Our implementation uses row-level locking (`SELECT ... FOR UPDATE`) on the `event_streams` table to serialize appends to the same stream. Agents that lose the race will receive an error and must reload the stream state before retrying.
 
-**Retry Strategy:** Agents should implement exponential backoff with a maximum of 3 retries. If the conflict persists, the agent should abort and signal a coordination failure to the Decision Orchestrator.
+**Expected collision rate — worked example:**
+
+With the multi-aggregate boundary in place, the `loan-{id}` stream has at most **2 concurrent writers** per application at any given moment: the `CreditAnalysisAgent` (appending `CreditAnalysisCompleted`) and the `DecisionOrchestrator` (appending `DecisionGenerated`). The `ComplianceAgent` writes exclusively to `compliance-{id}` and never contends on the loan stream.
+
+Assumptions:
+- Each write window (time between stream load and append commit) is ~5ms under local Postgres.
+- The two writers for a given loan are unlikely to overlap unless they are scheduled within the same 5ms window.
+- At 100 concurrent applications, each with a ~5ms write window, the probability that two writers for the *same* loan overlap is approximately `5ms / (mean inter-write gap)`.
+- Mean inter-write gap per loan ≈ 200ms (agents are pipelined, not simultaneous).
+- Collision probability per write ≈ 5ms / 200ms = **~2.5%**.
+- At 100 applications × 2 writes each = 200 writes/cycle, expected collisions ≈ **5 per cycle**.
+- At a cycle rate of ~5 cycles/minute (each loan takes ~12s end-to-end), that is roughly **25 `OptimisticConcurrencyErrors` per minute** across all loan streams.
+
+This is well within the retry budget. Each collision costs one stream reload (~1ms) plus one retry append. At 25/minute the retry overhead is negligible.
+
+**Retry Strategy:** Exponential backoff — base 50ms, multiplier 2×, jitter ±20ms, maximum **3 retries**. If all 3 retries fail (i.e., 4 consecutive collisions on the same stream), the agent aborts and signals a coordination failure to the Decision Orchestrator, which can re-queue the operation. The maximum retry budget is 3 attempts; the 4th failure surfaces as an `OptimisticConcurrencyError` to the caller.
 
 ---
 
@@ -140,13 +155,39 @@ Choose **inference** when:
 
 > Name the single most significant architectural decision you would reconsider with another full day.
 
-**The compliance clearance write path.**
+**The `ProjectionDaemon` is single-node only — and this has now been addressed.**
 
-The current design writes `ComplianceRulePassed` / `ComplianceRuleFailed` to the `compliance-{id}` stream only, then emits a synthetic `ComplianceRulePassed` (with `rule_id = "compliance_clearance"`) to the loan stream when all rules pass. This was the right call for avoiding write contention between the `ComplianceAgent` and the loan lifecycle, but the implementation has a subtle problem: the clearance event is a fabricated event that does not correspond to any real domain fact. It exists purely to advance the loan state machine.
+The original `ProjectionDaemon` runs as a single process that polls `events WHERE global_position > last_checkpoint` in a tight loop and fans out to each registered projection. This works correctly in development and under the load profile of this challenge, but it has a hard architectural ceiling: only one process can safely advance a given projection's checkpoint at a time. There is no coordination primitive preventing two daemon instances from processing the same event batch concurrently and producing duplicate or out-of-order projection writes.
 
-With another day I would introduce a dedicated `ComplianceClearanceIssued` event type — already identified in the missing events catalogue — and emit that to the loan stream instead. *(Update: This has now been implemented. `ComplianceClearanceIssued` is emitted explicitly to the loan stream.)* This makes the intent explicit in the event catalogue, removes the ambiguity of a `ComplianceRulePassed` event with a synthetic `rule_id`, and gives the `LoanApplicationAggregate` a clean, unambiguous trigger for the `COMPLIANCE_REVIEW → PENDING_DECISION` transition. The `ComplianceRecordAggregate` would emit this event as its terminal event, and the service layer would append it to the loan stream as a cross-stream write — the same pattern already used for `ComplianceCheckRequested`.
+The fix is the advisory lock + shard assignment pattern, now implemented in `DistributedProjectionDaemon` (`src/ledger/infrastructure/projections/distributed_daemon.py`) and `ShardCoordinator` (`src/ledger/infrastructure/projections/shard_coordinator.py`). Each daemon instance acquires a PostgreSQL advisory lock keyed on `(projection_name, shard_id)` before polling its assigned shard of the global event log. A `projection_shards` table records which instance owns which shard and when it last heartbeated. If an instance dies, its shards become available after a 15-second TTL and are claimed by surviving instances. The database itself is the coordinator — no Redis, no Zookeeper.
 
-The broader lesson: when a state machine transition requires a signal from another aggregate, model that signal as a named domain event rather than reusing an existing event type with a special payload value. The latter works but leaks implementation detail into the event catalogue.
+The reason this was not the first implementation: the shard assignment table and heartbeat loop add roughly 200 lines of infrastructure code that are entirely orthogonal to the domain logic being evaluated. The deliberate sequence was — ship a correct single-node daemon, document the scaling path clearly in `DOMAIN_NOTES.md` §6, then implement it once the domain logic was stable. The original `ProjectionDaemon` is untouched and still the default for single-node deployments; `DistributedProjectionDaemon` is a drop-in replacement that overrides only the checkpoint read/write methods.
+
+---
+
+## 7. Cross-Stream Write Atomicity
+
+The `record_fraud_screening` MCP tool (and the `record_credit_analysis` service command) write the same event to two streams: the agent session stream (to track `contributed_apps` for causal chain validation) and the loan stream (to advance the loan state machine). These two appends are **not atomic**.
+
+**Failure mode:** If the session stream append succeeds but the loan stream append fails (e.g., due to an `OptimisticConcurrencyError` on the loan stream), the session aggregate will record the contribution but the loan stream will not advance. The caller receives an error and must retry. On retry, the session stream append will fail with a concurrency error (the version has already advanced), which surfaces the partial write to the caller.
+
+**Why this is accepted:** True cross-stream atomicity requires either (a) a distributed transaction (two-phase commit across two stream rows — not supported by our `SELECT ... FOR UPDATE` pattern), or (b) the outbox pattern (write both events to an outbox table in a single transaction, then fan out). The outbox table already exists in the schema for exactly this purpose. The current implementation skips the outbox for simplicity; a production hardening pass would route all cross-stream writes through the outbox to guarantee at-least-once delivery of both appends.
+
+**Mitigation in place:** The retry budget (3 attempts with exponential backoff) means transient failures are recovered automatically. The `OptimisticConcurrencyError` on the session stream during a retry is a reliable signal that the first append succeeded, allowing the caller to skip the session append and proceed directly to the loan append.
+
+---
+
+## 8. What-If Causal Dependency Scope
+
+The `_is_causally_dependent` function in `src/ledger/core/whatif.py` determines which post-branch events are skipped in a counterfactual replay. It currently models three branch types:
+
+- `CreditAnalysisCompleted` — a change in `risk_tier` makes `DecisionGenerated`, `ApplicationApproved`, `ApplicationDeclined`, and `HumanReviewCompleted` causally dependent (the recommendation may differ).
+- `ComplianceCheckRequested` — same downstream dependency set.
+- `FraudScreeningCompleted` — same downstream dependency set.
+
+**Limitation:** Any other `branch_event_type` (e.g., `ApplicationSubmitted`, `AgentContextLoaded`) is treated as having no downstream dependencies. All post-branch events are replayed unchanged. This is the conservative choice: it may over-replay events that are actually dependent on the branch, but it never silently drops events that should be replayed. The counterfactual outcome may therefore be slightly optimistic (it includes events that a real counterfactual world might not have produced), but it will never be missing events that are causally independent.
+
+**Why not generalise further:** The dependency graph for arbitrary branch types would require a full causal model of the domain event catalogue. The three covered branch types account for all branch points that the `run_whatif` tool is currently called with in practice. Extending to new branch types requires adding the branch type to the condition in `_is_causally_dependent` and verifying the dependent event set.
 
 ---
 

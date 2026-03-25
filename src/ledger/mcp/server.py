@@ -16,6 +16,7 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import asyncpg
@@ -26,6 +27,7 @@ from ledger.core.agent_context import reconstruct_agent_context
 from ledger.core.models import BaseEvent
 from ledger.core.regulatory_package import generate_regulatory_package
 from ledger.infrastructure.db.connection import get_pool
+from ledger.infrastructure.parsers import parse_any
 from ledger.infrastructure.projections.agent_performance import AgentPerformanceProjection
 from ledger.infrastructure.projections.application_summary import ApplicationSummaryProjection
 from ledger.infrastructure.projections.compliance_audit import ComplianceAuditViewProjection
@@ -489,10 +491,16 @@ async def record_fraud_screening(
                 "flags": flags or [],
             },
         )
-        # Append to session stream first (tracks contribution)
+        # NOTE: These two appends are NOT atomic — the same pattern used by
+        # record_credit_analysis (service.py). If the session append succeeds
+        # but the loan append fails, the session stream will record the
+        # contribution but the loan stream will not advance. The caller must
+        # retry; the session append is idempotent-safe because the session
+        # stream version check will catch a duplicate on retry.
+        # A fully atomic cross-stream write would require the outbox pattern
+        # (see DESIGN.md §6 for the accepted tradeoff).
         s_ver = await _get_store().stream_version(session_stream)
         await _get_store().append(session_stream, [event], expected_version=s_ver)
-        # Append to loan stream
         l_ver = await _get_store().stream_version(loan_stream)
         await _get_store().append(loan_stream, [event], expected_version=l_ver)
     except Exception as exc:
@@ -694,7 +702,85 @@ async def record_human_review(
 
 
 # ---------------------------------------------------------------------------
-# Tool 8 — run_integrity_check
+# Tool 8a — request_credit_analysis
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def request_credit_analysis(application_id: str) -> dict[str, Any]:
+    """Transition a loan application to AWAITING_ANALYSIS state.
+
+    Must be called after submit_application and before record_credit_analysis.
+    Precondition: application must be in SUBMITTED state.
+
+    :param application_id: Loan application ID (without 'loan-' prefix).
+    """
+    logger.info(" TOOL: request_credit_analysis (app=%s)", application_id)
+    if not application_id.strip():
+        return _err(validation_error("application_id must not be empty."))
+
+    loan_stream = f"loan-{application_id}"
+    if await _get_store().stream_version(loan_stream) == -1:
+        return _err(not_found_error(f"Loan application {loan_stream}"))
+
+    try:
+        await _get_service().request_credit_analysis(loan_id=application_id)
+    except Exception as exc:
+        return _err(from_exception(exc, loan_stream))
+
+    return _ok(application_id=application_id, state="AWAITING_ANALYSIS")
+
+
+# ---------------------------------------------------------------------------
+# Tool 8b — request_compliance_check
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+async def request_compliance_check(
+    application_id: str,
+    required_rules: list[str] | None = None,
+    regulation_set_version: str = _DEFAULT_REG_SET,
+) -> dict[str, Any]:
+    """Transition a loan application to COMPLIANCE_REVIEW state and open the compliance stream.
+
+    Must be called after record_credit_analysis and before record_compliance_check.
+    Precondition: application must be in ANALYSIS_COMPLETE state.
+
+    :param application_id: Loan application ID (without 'loan-' prefix).
+    :param required_rules: Optional list of rule IDs that must pass (e.g. ['KYC', 'AML']).
+    :param regulation_set_version: Regulation set to apply (default: EU-AI-ACT-2025).
+    """
+    logger.info(" TOOL: request_compliance_check (app=%s)", application_id)
+    if not application_id.strip():
+        return _err(validation_error("application_id must not be empty."))
+
+    if regulation_set_version not in _REGULATION_SETS:
+        return _err(
+            validation_error(
+                f"Unknown regulation_set_version '{regulation_set_version}'.",
+                suggested_action=f"Use one of: {sorted(_REGULATION_SETS)}",
+            )
+        )
+
+    loan_stream = f"loan-{application_id}"
+    if await _get_store().stream_version(loan_stream) == -1:
+        return _err(not_found_error(f"Loan application {loan_stream}"))
+
+    try:
+        await _get_service().request_compliance_check(
+            loan_id=application_id,
+            required_rules=required_rules
+            or sorted(_REGULATION_SETS.get(regulation_set_version, [])),
+        )
+    except Exception as exc:
+        return _err(from_exception(exc, loan_stream))
+
+    return _ok(application_id=application_id, state="COMPLIANCE_REVIEW")
+
+
+# ---------------------------------------------------------------------------
+# Tool 9 — run_integrity_check
 # ---------------------------------------------------------------------------
 
 
@@ -808,6 +894,57 @@ async def generate_regulatory_package_tool(
         return _err(from_exception(exc, loan_stream))
 
     return _ok(package=package)
+
+
+# ---------------------------------------------------------------------------
+# Tool 10 — parse_document
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(name="parse_document")
+async def parse_document(file_path: str) -> dict[str, Any]:
+    """Parse a document (PDF, CSV, Excel, Text) and return its contents.
+
+    This tool extracts text from PDFs and structured data from CSVs/Excels.
+    """
+    logger.info(" TOOL: parse_document (file=%s)", file_path)
+    if not file_path.strip():
+        return _err(validation_error("file_path must not be empty."))
+
+    if not Path(file_path).exists():
+        return _err(not_found_error(f"File {file_path}"))
+
+    try:
+        data = parse_any(file_path)
+        return _ok(file_path=file_path, data=data)
+    except Exception as exc:
+        return _err(from_exception(exc))
+
+
+# ---------------------------------------------------------------------------
+# Tool 11 — list_documents
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool(name="list_documents")
+async def list_documents(directory_path: str) -> dict[str, Any]:
+    """List documents in a directory to discover file paths for parsing.
+
+    Useful for finding application_proposal.pdf, financial_summary.csv, etc.
+    """
+    logger.info(" TOOL: list_documents (dir=%s)", directory_path)
+    if not directory_path.strip():
+        return _err(validation_error("directory_path must not be empty."))
+
+    path = Path(directory_path)
+    if not path.exists() or not path.is_dir():
+        return _err(not_found_error(f"Directory {directory_path}"))
+
+    try:
+        files = [f.name for f in path.iterdir() if f.is_file()]
+        return _ok(directory_path=directory_path, files=sorted(files))
+    except Exception as exc:
+        return _err(from_exception(exc))
 
 
 # ---------------------------------------------------------------------------

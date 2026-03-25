@@ -211,3 +211,7 @@ starter/
 
 #roo code
 .roo/
+
+#fixtures folder
+fixtures/
+profiles/

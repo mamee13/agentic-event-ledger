@@ -9,6 +9,8 @@ Stream ID formats:
   audit-{entity_type}-{entity_id}
 """
 
+from typing import Any
+
 from ledger.core.aggregates import (
     AgentSessionAggregate,
     ComplianceRecordAggregate,
@@ -179,6 +181,7 @@ class LedgerService:
     async def request_compliance_check(
         self,
         loan_id: str,
+        required_rules: list[str] | None = None,
         correlation_id: str | None = None,
         causation_id: str | None = None,
     ) -> None:
@@ -191,12 +194,12 @@ class LedgerService:
         loan = await self._load_loan(loan_id)
         compliance = await self._load_compliance(loan_id)
 
-        loan_event = BaseEvent(
-            event_type="ComplianceCheckRequested", payload={"application_id": loan_id}
-        )
-        comp_event = BaseEvent(
-            event_type="ComplianceCheckRequested", payload={"application_id": loan_id}
-        )
+        payload: dict[str, Any] = {"application_id": loan_id}
+        if required_rules:
+            payload["required_rules"] = required_rules
+
+        loan_event = BaseEvent(event_type="ComplianceCheckRequested", payload=payload)
+        comp_event = BaseEvent(event_type="ComplianceCheckRequested", payload=payload)
 
         await self.store.append(
             f"loan-{loan_id}",
@@ -229,7 +232,10 @@ class LedgerService:
         loan stream so the loan state machine advances from COMPLIANCE_REVIEW to
         PENDING_DECISION.
         """
+        # 1. Load & Validate
         compliance = await self._load_compliance(loan_id)
+        loan = await self._load_loan(loan_id)
+        loan.guard_record_compliance()
 
         event_type = "ComplianceRulePassed" if status == "PASSED" else "ComplianceRuleFailed"
         payload: dict[str, str] = {
@@ -366,6 +372,14 @@ class LedgerService:
 
         # 2. Validate
         loan.guard_human_review(override, override_reason)
+        if override and not override_reason:
+            from ledger.core.errors import DomainRuleError
+
+            raise DomainRuleError(
+                rule_name="human_review",
+                message="override_reason is required when override=True",
+                suggested_action="Provide a reason for the override.",
+            )
 
         # 3. Determine
         event = BaseEvent(

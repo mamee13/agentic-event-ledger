@@ -108,3 +108,29 @@ CREATE TABLE IF NOT EXISTS projection_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_projection_snapshots_entity_pos ON projection_snapshots (projection_name, entity_id, global_position DESC);
 CREATE INDEX IF NOT EXISTS idx_projection_snapshots_created ON projection_snapshots (projection_name, entity_id, created_at DESC);
+
+-- Distributed daemon coordination tables
+-- Each row represents one shard owned by one daemon node.
+-- Advisory lock key = hashtext(projection_name || ':' || shard_id)
+CREATE TABLE IF NOT EXISTS projection_shards (
+  shard_id         TEXT NOT NULL,
+  projection_name  TEXT NOT NULL,
+  assigned_node    TEXT NOT NULL,          -- hostname / pod ID
+  heartbeat_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  global_pos_from  BIGINT NOT NULL DEFAULT 0,
+  global_pos_to    BIGINT,                 -- NULL = open-ended tail shard
+  PRIMARY KEY (shard_id, projection_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_projection_shards_heartbeat
+  ON projection_shards (projection_name, heartbeat_at);
+
+-- Per-shard checkpoints (separate from the single-node projection_checkpoints table
+-- so the existing daemon continues to work without any changes).
+CREATE TABLE IF NOT EXISTS projection_shard_checkpoints (
+  projection_name  TEXT NOT NULL,
+  shard_id         TEXT NOT NULL,
+  last_position    BIGINT NOT NULL DEFAULT 0,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (projection_name, shard_id)
+);

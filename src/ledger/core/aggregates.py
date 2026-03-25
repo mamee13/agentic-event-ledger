@@ -20,13 +20,26 @@ class BaseAggregate(ABC, Generic[T]):
         self.changes: list[BaseEvent] = []
 
     def apply(self, event: BaseEvent | StoredEvent, is_new: bool = True) -> None:
-        """Applies an event to the aggregate and updates state."""
+        """Applies an event to the aggregate and updates state.
+
+        Guards are only enforced for new events (is_new=True). Replay from
+        history skips guards so that stored events are always accepted.
+        """
+        if is_new:
+            self._guard_event(event)
         self._apply_to_state(event)
         if isinstance(event, StoredEvent):
             self.version = event.stream_position
         elif is_new:
             self.changes.append(event)
             self.version += 1
+
+    def _guard_event(self, event: BaseEvent | StoredEvent) -> None:
+        """Dispatches to a guard method before applying state. Override in subclasses."""
+        method_name = f"_guard_{self._to_snake_case(event.event_type)}"
+        guard = getattr(self, method_name, None)
+        if guard:
+            guard(event)
 
     def _apply_to_state(self, event: BaseEvent | StoredEvent) -> None:
         """Dispatches the event to a specific handler method."""
@@ -139,6 +152,32 @@ class LoanApplicationAggregate(BaseAggregate[LoanState]):
 
     # ------------------------------------------------------------------ guards
 
+    def _guard_credit_analysis_requested(self, _event: BaseEvent | StoredEvent) -> None:
+        self.guard_request_credit_analysis()
+
+    def _guard_credit_analysis_completed(self, _event: BaseEvent | StoredEvent) -> None:
+        self.guard_record_credit_analysis()
+
+    def _guard_compliance_check_requested(self, _event: BaseEvent | StoredEvent) -> None:
+        self.guard_request_compliance_check()
+
+    def _guard_compliance_rule_passed(self, _event: BaseEvent | StoredEvent) -> None:
+        self.guard_record_compliance()
+
+    def _guard_compliance_rule_failed(self, _event: BaseEvent | StoredEvent) -> None:
+        self.guard_record_compliance()
+
+    def _guard_decision_generated(self, event: BaseEvent | StoredEvent) -> None:
+        self.guard_generate_decision(event.payload)
+
+    def _guard_human_review_completed(self, event: BaseEvent | StoredEvent) -> None:
+        override = bool(event.payload.get("override", False))
+        override_reason = event.payload.get("override_reason")
+        self.guard_human_review(override, override_reason)
+
+    def _guard_application_approved(self, _event: BaseEvent | StoredEvent) -> None:
+        self.guard_finalize_approval(self.is_compliance_passed)
+
     def guard_request_credit_analysis(self) -> None:
         if self.state != LoanState.SUBMITTED:
             raise DomainRuleError(
@@ -191,7 +230,7 @@ class LoanApplicationAggregate(BaseAggregate[LoanState]):
                 message="DecisionGenerated must have contributing_agent_sessions",
             )
 
-    def guard_human_review(self, override: bool, override_reason: str | None) -> None:
+    def guard_human_review(self, _override: bool, _override_reason: str | None) -> None:
         valid_states = {
             LoanState.APPROVED_PENDING_HUMAN,
             LoanState.DECLINED_PENDING_HUMAN,
@@ -201,12 +240,6 @@ class LoanApplicationAggregate(BaseAggregate[LoanState]):
             raise DomainRuleError(
                 rule_name="state_machine",
                 message=f"HumanReviewCompleted invalid from state {self.state}",
-            )
-        if override and not override_reason:
-            raise DomainRuleError(
-                rule_name="human_review",
-                message="override_reason is required when override=True",
-                suggested_action="Provide a reason for the override.",
             )
 
     def guard_finalize_approval(self, is_compliance_passed: bool) -> None:
@@ -280,6 +313,47 @@ class AgentSessionAggregate(BaseAggregate[str]):
 
     # ------------------------------------------------------------------ guards
 
+    def _guard_agent_context_loaded(self, _event: BaseEvent | StoredEvent) -> None:
+        if self.context_loaded:
+            raise DomainRuleError(
+                rule_name="gas_town",
+                message=(
+                    f"AgentContextLoaded must be the first event in session {self.id}; "
+                    "context is already loaded."
+                ),
+                suggested_action="Do not replay AgentContextLoaded after session has started.",
+            )
+
+    def _guard_credit_analysis_completed(self, _event: BaseEvent | StoredEvent) -> None:
+        if not self.context_loaded:
+            raise DomainRuleError(
+                rule_name="gas_town",
+                message=(
+                    f"Session {self.id}: CreditAnalysisCompleted recorded before AgentContextLoaded"
+                ),
+                suggested_action="Ensure AgentContextLoaded is the first event on this session.",
+            )
+
+    def _guard_fraud_screening_completed(self, _event: BaseEvent | StoredEvent) -> None:
+        if not self.context_loaded:
+            raise DomainRuleError(
+                rule_name="gas_town",
+                message=(
+                    f"Session {self.id}: FraudScreeningCompleted recorded before AgentContextLoaded"
+                ),
+                suggested_action="Ensure AgentContextLoaded is the first event on this session.",
+            )
+
+    def _guard_decision_generated(self, _event: BaseEvent | StoredEvent) -> None:
+        if not self.context_loaded:
+            raise DomainRuleError(
+                rule_name="gas_town",
+                message=(
+                    f"Session {self.id}: DecisionGenerated recorded before AgentContextLoaded"
+                ),
+                suggested_action="Ensure AgentContextLoaded is the first event on this session.",
+            )
+
     def guard_start_session(self) -> None:
         if self.version != -1:
             raise DomainRuleError(
@@ -319,11 +393,15 @@ class ComplianceRecordAggregate(BaseAggregate[str]):
         super().__init__(application_id)
         self.application_id = application_id
         self.results: dict[str, str] = {}
+        self.required_rules: set[str] = set()
         self.is_passed: bool = False
         self.check_requested: bool = False
 
-    def _apply_compliance_check_requested(self, _event: BaseEvent | StoredEvent) -> None:
+    def _apply_compliance_check_requested(self, event: BaseEvent | StoredEvent) -> None:
         self.check_requested = True
+        rules = event.payload.get("required_rules")
+        if rules:
+            self.required_rules = set(rules)
 
     def _apply_compliance_rule_passed(self, _event: BaseEvent | StoredEvent) -> None:
         rule_id = str(_event.payload.get("rule_id", "default"))
@@ -336,7 +414,15 @@ class ComplianceRecordAggregate(BaseAggregate[str]):
         self._update_is_passed()
 
     def _update_is_passed(self) -> None:
-        self.is_passed = bool(self.results) and all(v == "PASSED" for v in self.results.values())
+        if not self.required_rules:
+            # Fallback if no rules were specified:
+            # at least one rule must have passed, and none failed
+            self.is_passed = bool(self.results) and all(
+                v == "PASSED" for v in self.results.values()
+            )
+        else:
+            # All required rules must be present and PASSED
+            self.is_passed = all(self.results.get(rule) == "PASSED" for rule in self.required_rules)
 
 
 class AuditLedgerAggregate(BaseAggregate[str]):

@@ -142,9 +142,9 @@ def _infer_regulatory_basis(recorded_at: str | None) -> list[str]:
 
 **What Marten 7.0 introduced:** Distributed projection execution where multiple application nodes each run a shard of the projection workload. A coordination layer (backed by the database) assigns stream ranges to nodes, detects node failures, and redistributes shards. No single node is a bottleneck; projection throughput scales horizontally.
 
-**Python equivalent:**
+**Python equivalent — implemented in `src/ledger/infrastructure/projections/`:**
 
-The coordination primitive is a **PostgreSQL advisory lock** combined with a **shard assignment table**.
+The coordination primitive is a **PostgreSQL advisory lock** combined with a **shard assignment table**. Both are now live in the schema and the codebase.
 
 ```
 projection_shards (
@@ -155,18 +155,31 @@ projection_shards (
     global_pos_from BIGINT,
     global_pos_to   BIGINT      -- NULL = open-ended (tail shard)
 )
+
+projection_shard_checkpoints (
+    projection_name TEXT,
+    shard_id        TEXT,
+    last_position   BIGINT,
+    updated_at      TIMESTAMPTZ
+)
 ```
 
 Each Python daemon node on startup:
 1. Attempts to acquire a PostgreSQL advisory lock for a shard (`pg_try_advisory_lock(shard_id_hash)`).
 2. If acquired, registers itself in `projection_shards` and begins processing events in its assigned `global_position` range.
-3. Updates `heartbeat_at` every 5 seconds.
+3. Updates `heartbeat_at` every 5 seconds via `ShardCoordinator.heartbeat_loop()`.
 
-A **coordinator process** (or the nodes themselves via leader election using `pg_try_advisory_lock`) monitors `heartbeat_at`. If a node's heartbeat is stale by >15 seconds, its shard is released and another node claims it.
+`ShardCoordinator.reclaim_stale_shards()` deletes rows where `heartbeat_at < NOW() - 15s`, making the shard available for the next node to claim. The advisory lock held by the dead node is released automatically when its connection drops.
 
-**Failure mode this guards against:** A single projection daemon node crashing mid-batch. Without distributed coordination, the projection stops until the node restarts. With shard redistribution, another node detects the stale heartbeat within 15 seconds and resumes from the dead node's last checkpoint. The checkpoint-per-shard in `projection_checkpoints` ensures no events are skipped or double-processed.
+Per-shard progress is tracked in `projection_shard_checkpoints` (separate from the single-node `projection_checkpoints` table, which remains untouched so the original `ProjectionDaemon` continues to work without modification).
 
-The key difference from Marten: Marten's daemon is built into the framework with battle-tested shard rebalancing. The Python equivalent requires explicit implementation of the heartbeat, leader election, and shard assignment logic — more code, same pattern.
+`DistributedProjectionDaemon` subclasses `ProjectionDaemon` and overrides only `_get_checkpoint` and `_update_checkpoint` to read/write from the shard-scoped table. All event processing, retry logic, and projection fan-out is inherited unchanged.
+
+**Failure mode this guards against:** A single projection daemon node crashing mid-batch. Without distributed coordination, the projection stops until the node restarts. With shard redistribution, another node detects the stale heartbeat within 15 seconds and resumes from the dead node's last checkpoint. No events are skipped or double-processed — the `ON CONFLICT DO UPDATE` in each projection's `handle_event` makes writes idempotent even if two nodes briefly overlap.
+
+**Test coverage:** `tests/integration/test_distributed_daemon.py` — 6 tests covering lock exclusivity, heartbeat refresh, stale-shard reclaim, per-shard checkpoint isolation, parallel processing without duplication, and lock release on stop.
+
+The key difference from Marten: Marten's daemon is built into the framework with battle-tested shard rebalancing. This implementation covers the same pattern with ~200 lines of explicit infrastructure code, no external coordination service required.
 
 **Inference strategy for `model_version`:** The model deployment history is a known, auditable external record (deployment logs, MLflow registry). Mapping `recorded_at` to a model version is a deterministic lookup, not a guess. The error rate is low for events with accurate timestamps; it is zero for events after version tracking was introduced.
 

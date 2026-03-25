@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ledger.core.audit_chain import verify_chain
@@ -254,7 +254,7 @@ async def generate_regulatory_package(
 
     return {
         "schema_version": "1.0",
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(UTC).isoformat(),
         "application_id": application_id,
         "examination_date": examination_date.isoformat(),
         "package_checksum": package_checksum,

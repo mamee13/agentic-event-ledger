@@ -160,16 +160,22 @@ class CreditAnalysisAgent(BaseApexAgent):
     async def _node_open_credit_record(self, state: CreditState) -> CreditState:
         t = time.time()
         app_id = state["application_id"]
-        event = BaseEvent(
-            event_type="CreditRecordOpened",
-            payload={
-                "application_id": app_id,
-                "applicant_id": state["applicant_id"],
-                "opened_at": datetime.now().isoformat(),
-            },
-        )
-        # New stream — expected_version = -1
-        await self.store.append(stream_id=f"credit-{app_id}", events=[event], expected_version=-1)
+
+        # Check if stream already exists
+        ver = await self.store.stream_version(f"credit-{app_id}")
+        if ver == -1:
+            event = BaseEvent(
+                event_type="CreditRecordOpened",
+                payload={
+                    "application_id": app_id,
+                    "applicant_id": state["applicant_id"],
+                    "opened_at": datetime.now().isoformat(),
+                },
+            )
+            await self.store.append(
+                stream_id=f"credit-{app_id}", events=[event], expected_version=-1
+            )
+
         ms = int((time.time() - t) * 1000)
         await self._record_node_execution(
             "open_credit_record",

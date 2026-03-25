@@ -1,0 +1,52 @@
+[
+  {
+    "company_id": "COMP-001",
+    "name": "Rodriguez Figueroa and Sanchez",
+    "industry": "construction",
+    "jurisdiction": "MS",
+    "legal_type": "LLC",
+    "trajectory": "DECLINING",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-002",
+    "name": "Robinson PLC",
+    "industry": "retail",
+    "jurisdiction": "OR",
+    "legal_type": "Corp",
+    "trajectory": "RECOVERING",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-003",
+    "name": "Wolfe LLC",
+    "industry": "technology",
+    "jurisdiction": "IL",
+    "legal_type": "LLC",
+    "trajectory": "STABLE",
+    "risk_segment": "HIGH",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-004",
+    "name": "Roman-Blair",
+    "industry": "retail",
+    "jurisdiction": "MN",
+    "legal_type": "LLC",
+    "trajectory": "DECLINING",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  },
+  {
+    "company_id": "COMP-005",
+    "name": "Jones Stanley and Mejia",
+    "industry": "logistics",
+    "jurisdiction": "MT",
+    "legal_type": "S-Corp",
+    "trajectory": "STABLE",
+    "risk_segment": "MEDIUM",
+    "compliance_flags": []
+  }
+]

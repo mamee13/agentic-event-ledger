@@ -147,11 +147,41 @@ class DocumentProcessingAgent(BaseApexAgent):
 
         facts: dict[str, Any] = {}
         try:
-            from document_refinery.pipeline import extract_financial_facts
+            from ledger.infrastructure.parsers import parse_any
 
             paths = state.get("document_paths") or []
             file_path = paths[0] if paths else ""
-            facts = await extract_financial_facts(file_path, "income_statement")
+            parsed_data = parse_any(file_path)
+
+            # Simple heuristic for stub extraction:
+            # If it's a list of dicts (CSV), look for matches.
+            # If it's text (PDF), search for patterns.
+            if isinstance(parsed_data, list):
+                for row in parsed_data:
+                    f = row.get("field", "").lower()
+                    if f in (
+                        "total_revenue",
+                        "net_income",
+                        "total_assets",
+                        "total_liabilities",
+                        "ebitda",
+                    ):
+                        facts[f] = float(row.get("value", 0))
+            elif isinstance(parsed_data, str):
+                import re
+
+                for field in (
+                    "total_revenue",
+                    "net_income",
+                    "total_assets",
+                    "total_liabilities",
+                    "ebitda",
+                ):
+                    match = re.search(
+                        rf"{field.replace('_', ' ')}[:\s]+\$?([\d,]+)", parsed_data, re.I
+                    )
+                    if match:
+                        facts[field] = float(match.group(1).replace(",", ""))
         except Exception:
             facts = {}
 
@@ -201,11 +231,38 @@ class DocumentProcessingAgent(BaseApexAgent):
 
         facts: dict[str, Any] = {}
         try:
-            from document_refinery.pipeline import extract_financial_facts
+            from ledger.infrastructure.parsers import parse_any
 
             paths = state.get("document_paths") or []
-            file_path = paths[1] if len(paths) > 1 else ""
-            facts = await extract_financial_facts(file_path, "balance_sheet")
+            file_path = paths[1] if len(paths) > 1 else (paths[0] if paths else "")
+            parsed_data = parse_any(file_path)
+
+            if isinstance(parsed_data, list):
+                for row in parsed_data:
+                    f = row.get("field", "").lower()
+                    if f in (
+                        "total_revenue",
+                        "net_income",
+                        "total_assets",
+                        "total_liabilities",
+                        "ebitda",
+                    ):
+                        facts[f] = float(row.get("value", 0))
+            elif isinstance(parsed_data, str):
+                import re
+
+                for field in (
+                    "total_revenue",
+                    "net_income",
+                    "total_assets",
+                    "total_liabilities",
+                    "ebitda",
+                ):
+                    match = re.search(
+                        rf"{field.replace('_', ' ')}[:\s]+\$?([\d,]+)", parsed_data, re.I
+                    )
+                    if match:
+                        facts[field] = float(match.group(1).replace(",", ""))
         except Exception:
             facts = {}
 

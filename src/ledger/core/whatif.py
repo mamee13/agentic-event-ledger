@@ -134,10 +134,27 @@ def _apply_events_to_summary(events: Sequence[StoredEvent | BaseEvent]) -> dict[
 
 
 def _is_causally_dependent(event_type: str, branch_event_type: str) -> bool:
-    """Returns True if event_type is causally dependent on the branch event type."""
-    if branch_event_type == "CreditAnalysisCompleted":
+    """Returns True if event_type is causally dependent on the branch event type.
+
+    Current coverage:
+    - CreditAnalysisCompleted: downstream decision events depend on risk_tier.
+    - ComplianceCheckRequested: downstream decision events depend on compliance outcome.
+    - FraudScreeningCompleted: downstream decision events depend on fraud_score.
+
+    Limitation: only the above three branch types are modelled. Any other
+    branch_event_type is treated as having no downstream dependencies (all
+    post-branch events are replayed unchanged). This is conservative — it may
+    over-replay events that are actually dependent — but it never silently
+    drops events that should be replayed. See DESIGN.md §8 for the full
+    discussion of this tradeoff.
+    """
+    if branch_event_type in (
+        "CreditAnalysisCompleted",
+        "ComplianceCheckRequested",
+        "FraudScreeningCompleted",
+    ):
         return event_type in _CREDIT_DEPENDENT_EVENTS
-    # Default: no dependency known — treat as independent
+    # Default: no dependency known — treat as independent (conservative replay)
     return False
 
 
