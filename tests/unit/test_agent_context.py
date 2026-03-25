@@ -44,6 +44,9 @@ async def test_empty_stream_returns_safe_defaults() -> None:
     assert ctx.needs_reconciliation is False
     assert ctx.agent_id is None
     assert ctx.recent_events == []
+    assert ctx.pending_work == []
+    assert ctx.session_health_status == "OK"
+    assert ctx.last_event_position == 0
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +85,10 @@ async def test_partial_last_event_sets_needs_reconciliation() -> None:
     ]
     ctx = await reconstruct_agent_context("agent-a1-s1", _mock_store(events))
     assert ctx.needs_reconciliation is True
-    assert ctx.pending_work == "CreditAnalysisRequested"
+    assert ctx.pending_work == ["CreditAnalysisRequested"]
     assert ctx.last_completed_action == "CreditAnalysisCompleted"
+    assert ctx.session_health_status == "NEEDS_RECONCILIATION"
+    assert ctx.last_event_position == 3
 
 
 @pytest.mark.asyncio
@@ -93,8 +98,10 @@ async def test_only_context_loaded_sets_needs_reconciliation() -> None:
     ]
     ctx = await reconstruct_agent_context("agent-a1-s1", _mock_store(events))
     assert ctx.needs_reconciliation is True
-    assert ctx.pending_work == "AgentContextLoaded"
+    assert ctx.pending_work == ["AgentContextLoaded"]
     assert ctx.last_completed_action is None
+    assert ctx.session_health_status == "NEEDS_RECONCILIATION"
+    assert ctx.last_event_position == 1
 
 
 # ---------------------------------------------------------------------------
