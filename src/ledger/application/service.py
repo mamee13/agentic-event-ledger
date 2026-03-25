@@ -586,6 +586,7 @@ class LedgerService:
         """Run a cryptographic integrity check on the loan's audit stream.
 
         Appends an AuditIntegrityCheckRun event to audit-loan-{loan_id} and
-        returns (new_integrity_hash, previous_hash).
+        returns (new_integrity_hash, previous_hash) for backwards-compatible callers.
         """
-        return await run_integrity_check(f"audit-loan-{loan_id}", self.store)
+        result = await run_integrity_check(f"audit-loan-{loan_id}", self.store)
+        return result.integrity_hash, result.previous_hash

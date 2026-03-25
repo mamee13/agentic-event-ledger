@@ -241,6 +241,17 @@ class LoanApplicationAggregate(BaseAggregate[LoanState]):
                 rule_name="causal_chain",
                 message="DecisionGenerated must have contributing_agent_sessions",
             )
+        confidence = event_payload.get("confidence_score")
+        recommendation = event_payload.get("recommendation")
+        if confidence is not None and float(confidence) < 0.6 and recommendation != "REFER":
+            raise DomainRuleError(
+                rule_name="confidence_floor",
+                message=(
+                    f"Rule 4 Violation: confidence_score {confidence} is below the 0.6 floor. "
+                    "recommendation must be REFER."
+                ),
+                suggested_action="Set recommendation to REFER when confidence_score < 0.6.",
+            )
 
     def guard_human_review(self, _override: bool, _override_reason: str | None) -> None:
         valid_states = {

@@ -140,12 +140,30 @@ class ProjectionDaemon:
         )
 
     async def get_lag(self, projection_name: str) -> int:
-        """Returns the lag for a specific projection."""
-        last_pos = await self._get_checkpoint(projection_name)
-        max_global = await self._pool.fetchval("SELECT MAX(global_position) FROM events")
-        if max_global is None:
+        """Returns the lag in milliseconds between the latest event and the last processed event."""
+        res = await self._pool.fetchrow(
+            """
+            SELECT
+                EXTRACT(EPOCH FROM (
+                    (SELECT recorded_at FROM events ORDER BY global_position DESC LIMIT 1)
+                    -
+                    COALESCE(
+                        (
+                            SELECT e.recorded_at FROM events e
+                            JOIN projection_checkpoints pc
+                              ON pc.projection_name = $1
+                             AND e.global_position = pc.last_position
+                            LIMIT 1
+                        ),
+                        (SELECT recorded_at FROM events ORDER BY global_position ASC LIMIT 1)
+                    )
+                )) * 1000 AS lag_ms
+            """,
+            projection_name,
+        )
+        if res is None or res["lag_ms"] is None:
             return 0
-        return int(max_global) - last_pos
+        return max(0, int(res["lag_ms"]))
 
     def stop(self) -> None:
         self._is_running = False
