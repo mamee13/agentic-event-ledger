@@ -164,20 +164,23 @@ async def test_run_integrity_check_appends_event() -> None:
     data_event = _make_event("ApplicationSubmitted", {"application_id": "a1"}, global_position=1)
 
     store = AsyncMock()
+    # load_stream_raw called twice: once before append, once after for chain verification
     store.load_stream_raw = AsyncMock(return_value=[data_event])
     store.stream_version = AsyncMock(return_value=1)
     store.append = AsyncMock(return_value=2)
 
-    new_hash, prev_hash = await run_integrity_check("audit-loan-123", store)
+    result = await run_integrity_check("audit-loan-123", store)
 
-    assert prev_hash == ""  # no prior check run
-    assert len(new_hash) == 64  # sha256 hex
+    assert result.previous_hash == ""  # no prior check run
+    assert len(result.integrity_hash) == 64  # sha256 hex
+    assert result.chain_valid is True
+    assert result.tamper_detected is False
     store.append.assert_called_once()
 
     # Verify the appended event payload
     appended_event = store.append.call_args[0][1][0]
     assert appended_event.event_type == "AuditIntegrityCheckRun"
-    assert appended_event.payload["integrity_hash"] == new_hash
+    assert appended_event.payload["integrity_hash"] == result.integrity_hash
     assert appended_event.payload["previous_hash"] == ""
     assert appended_event.payload["events_hashed"] == 1
 
@@ -202,8 +205,8 @@ async def test_run_integrity_check_chains_from_previous() -> None:
     store.stream_version = AsyncMock(return_value=3)
     store.append = AsyncMock(return_value=4)
 
-    new_hash, prev_hash = await run_integrity_check("audit-loan-123", store)
+    result = await run_integrity_check("audit-loan-123", store)
 
-    assert prev_hash == h1  # chains from previous check
+    assert result.previous_hash == h1  # chains from previous check
     expected = compute_integrity_hash(h1, [e2])
-    assert new_hash == expected
+    assert result.integrity_hash == expected
