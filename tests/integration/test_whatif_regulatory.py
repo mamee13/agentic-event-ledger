@@ -253,6 +253,20 @@ async def test_whatif_risk_tier_medium_to_high_diverges() -> None:
     # Some dependent events must have been skipped
     assert result.events_skipped > 0
 
+    print("\n\n" + "=" * 50)
+    print("WHAT-IF COUNTERFACTUAL: RISK_TIER MEDIUM -> HIGH")
+    print("=" * 50)
+    print("1. Real Outcome (MEDIUM risk):")
+    print(f"   State:     {result.real_outcome.get('state')}")
+    print(f"   Risk Tier: {result.real_outcome.get('risk_tier')}")
+    print("2. Counterfactual Outcome (HIGH risk):")
+    print(f"   State:     {result.counterfactual_outcome.get('state')}")
+    print(f"   Risk Tier: {result.counterfactual_outcome.get('risk_tier')}")
+    print(f"\nDivergence detected in fields: {', '.join(result.divergence_events)}")
+    print(f"Events skipped due to causal dependency: {result.events_skipped}")
+    print("Cascading effect of business rules verified.")
+    print("==================================================\n")
+
     await pool.close()
 
 

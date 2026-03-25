@@ -59,6 +59,18 @@ async def test_upcasting_does_not_mutate_db_row() -> None:
     assert "model_version" not in raw_payload_after, "DB row must remain unchanged after load"
     assert raw_row_after["event_version"] == 1, "DB event_version must remain 1"
 
+    print("\n\n" + "=" * 50)
+    print("UPCASTING & IMMUTABILITY VERIFIED")
+    print("=" * 50)
+    print(f"1. Stored v1 Event in DB (event_version = {raw_row['event_version']})")
+    print(f"   Raw DB contains model_version? {'model_version' in raw_payload}")
+    print(f"2. Loaded via EventStore (event_version = {loaded.event_version})")
+    print(f"   Upcasted Payload contains model_version? {'model_version' in loaded.payload}")
+    print(f"   Upcasted Payload contains confidence_score? {'confidence_score' in loaded.payload}")
+    print(f"3. Re-queried DB for immutability (event_version = {raw_row_after['event_version']})")
+    print(f"   Raw DB contains model_version? {'model_version' in raw_payload_after}")
+    print("==================================================\n")
+
     await pool.close()
 
 

@@ -52,6 +52,19 @@ async def test_double_decision_concurrency() -> None:
     successes = [r for r in results if isinstance(r, int)]
     failures = [r for r in results if isinstance(r, OptimisticConcurrencyError)]
 
+    print("\n\n" + "=" * 50)
+    print("CONCURRENCY COLLISION DETECTED")
+    print("=" * 50)
+    print("Agents attempting simultaneous append: 2")
+    print("Expected Version for both: 3")
+    print(f"Successful appends: {len(successes)} (Stream version advanced to 4)")
+    print(f"Failed appends: {len(failures)}")
+    if failures:
+        print("Error received by losing agent:")
+        print(f"  --> {type(failures[0]).__name__}: {str(failures[0])}")
+        print("Losing agent must drop state, load stream from version 4, and retry.")
+    print("=" * 50 + "\n")
+
     assert len(successes) == 1, f"Expected 1 success, got {len(successes)}: {results}"
     assert len(failures) == 1, f"Expected 1 failure, got {len(failures)}: {results}"
     assert successes[0] == 4
